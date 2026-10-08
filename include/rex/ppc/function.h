@@ -101,27 +101,30 @@ struct arg_count_t {
 //=============================================================================
 
 struct ArgTranslator {
-  // Get integer argument value from register or stack
+  // Get integer argument value from register or stack.
+  // Registers are returned as full 64-bit values: returning only the low 32 bits truncated u64
+  // arguments (e.g. the XUID passed to XamContentAggregateCreateEnumerator, so no saves were
+  // found). 32-bit, pointer and bool arguments are narrowed by the GetValue overloads below.
   static constexpr uint64_t GetIntegerArgumentValue(const PPCContext& ctx, uint8_t* base,
                                                     size_t arg) noexcept {
     if (arg <= 7) {
       switch (arg) {
         case 0:
-          return ctx.r3.u32;
+          return ctx.r3.u64;
         case 1:
-          return ctx.r4.u32;
+          return ctx.r4.u64;
         case 2:
-          return ctx.r5.u32;
+          return ctx.r5.u64;
         case 3:
-          return ctx.r6.u32;
+          return ctx.r6.u64;
         case 4:
-          return ctx.r7.u32;
+          return ctx.r7.u64;
         case 5:
-          return ctx.r8.u32;
+          return ctx.r8.u64;
         case 6:
-          return ctx.r9.u32;
+          return ctx.r9.u64;
         case 7:
-          return ctx.r10.u32;
+          return ctx.r10.u64;
         default:
           break;
       }
@@ -257,7 +260,13 @@ struct ArgTranslator {
   template <BigEndianType T>
   static constexpr T GetValue(PPCContext& ctx, uint8_t* base, size_t idx) noexcept {
     T result;
-    result.value = static_cast<decltype(result.value)>(GetIntegerArgumentValue(ctx, base, idx));
+    using value_t = decltype(result.value);
+    const uint64_t v = GetIntegerArgumentValue(ctx, base, idx);
+    if constexpr (sizeof(value_t) <= 4) {
+      result.value = static_cast<value_t>(static_cast<uint32_t>(v));
+    } else {
+      result.value = static_cast<value_t>(v);
+    }
     return result;
   }
 
@@ -265,7 +274,7 @@ struct ArgTranslator {
   template <MappedPtrType T>
   static T GetValue(PPCContext& ctx, uint8_t* base, size_t idx) noexcept {
     using inner_t = typename mapped_ptr_inner_type<T>::type;
-    const auto v = GetIntegerArgumentValue(ctx, base, idx);
+    const auto v = static_cast<uint32_t>(GetIntegerArgumentValue(ctx, base, idx));
     if (!v) {
       return T(nullptr);
     }
@@ -279,6 +288,8 @@ struct ArgTranslator {
   static constexpr T GetValue(PPCContext& ctx, uint8_t* base, size_t idx) noexcept {
     if constexpr (is_precise_v<T>) {
       return static_cast<T>(GetPrecisionArgumentValue(ctx, base, idx));
+    } else if constexpr (sizeof(T) <= 4) {
+      return static_cast<T>(static_cast<uint32_t>(GetIntegerArgumentValue(ctx, base, idx)));
     } else {
       return static_cast<T>(GetIntegerArgumentValue(ctx, base, idx));
     }
@@ -288,7 +299,7 @@ struct ArgTranslator {
   template <typename T>
     requires std::is_pointer_v<T>
   static constexpr T GetValue(PPCContext& ctx, uint8_t* base, size_t idx) noexcept {
-    const auto v = GetIntegerArgumentValue(ctx, base, idx);
+    const auto v = static_cast<uint32_t>(GetIntegerArgumentValue(ctx, base, idx));
     if (!v) {
       return nullptr;
     }

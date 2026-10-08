@@ -11,6 +11,7 @@
  */
 
 #include <memory>
+#include <mutex>
 #include <vector>
 
 #include <rex/input/device_assignment.h>
@@ -55,6 +56,12 @@ class InputSystem : public system::IInputSystem {
   const DeviceInfo* DeviceInfoFor(DeviceId id) const;
 
   rex::ui::Window* window_ = nullptr;
+
+  // Guest threads call the XamInput* entry points concurrently (a game may
+  // poll pads on one thread and set vibration on another), and each call
+  // rebuilds devices_ in RefreshDevices. Guards everything below except
+  // drivers_, which only changes during setup.
+  std::mutex state_mutex_;
 
   std::vector<std::unique_ptr<InputDriver>> drivers_;
 

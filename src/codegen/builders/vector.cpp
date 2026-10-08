@@ -1112,17 +1112,17 @@ bool build_vpkuhum(BuilderContext& ctx) {
 
 bool build_vpkuhus(BuilderContext& ctx) {
   // Vector Pack Unsigned Halfword Unsigned Saturate
-  // NOTE(tomc): _mm_packus_epi16 treats inputs as signed, so we need custom saturation for
-  // unsigned. Unsigned halfwords >= 0x8000 would be interpreted as negative and clamped to 0
-  // instead of 0xFF.
-  for (size_t i = 0; i < 8; i++) {
-    ctx.println("\t{}.u8[{}] = {}.u16[{}] > 0xFF ? 0xFF : (uint8_t){}.u16[{}];",
-                ctx.v(ctx.insn.operands[0]), 15 - i, ctx.v(ctx.insn.operands[1]), 7 - i,
-                ctx.v(ctx.insn.operands[1]), 7 - i);
-    ctx.println("\t{}.u8[{}] = {}.u16[{}] > 0xFF ? 0xFF : (uint8_t){}.u16[{}];",
-                ctx.v(ctx.insn.operands[0]), 7 - i, ctx.v(ctx.insn.operands[2]), 7 - i,
-                ctx.v(ctx.insn.operands[2]), 7 - i);
-  }
+  // The old per-element loop wrote vD while still reading vA/vB, so
+  // `vpkuhus vX,vX,vY` (vD aliasing a source) corrupted its own inputs (green
+  // VP6/FMV blocks, rexglue-sdk #364/#426). Clamp each u16 to 0xFF with an
+  // unsigned min (so the signed packus is exact), load both sources before the
+  // store, and keep vB in the low host half / vA in the high half as the other
+  // pack builders do (guest->host element reversal).
+  ctx.println(
+      "\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_packus_epi16("
+      "simde_mm_min_epu16(simde_mm_load_si128((simde__m128i*){}.u16), simde_mm_set1_epi16(0xFF)), "
+      "simde_mm_min_epu16(simde_mm_load_si128((simde__m128i*){}.u16), simde_mm_set1_epi16(0xFF))));",
+      ctx.v(ctx.insn.operands[0]), ctx.v(ctx.insn.operands[2]), ctx.v(ctx.insn.operands[1]));
   return true;
 }
 
@@ -1140,17 +1140,12 @@ bool build_vpkuwum(BuilderContext& ctx) {
 
 bool build_vpkuwus(BuilderContext& ctx) {
   // Vector Pack Unsigned Word Unsigned Saturate
-
-  // NOTE(tomc): _mm_packus_epi32 treats inputs as signed, so we need custom saturation for unsigned
-  // Saturate each u32 to [0, 0xFFFF], then pack to u16
-  for (size_t i = 0; i < 4; i++) {
-    ctx.println("\t{}.u16[{}] = {}.u32[{}] > 0xFFFF ? 0xFFFF : (uint16_t){}.u32[{}];",
-                ctx.v(ctx.insn.operands[0]), 7 - i, ctx.v(ctx.insn.operands[1]), 3 - i,
-                ctx.v(ctx.insn.operands[1]), 3 - i);
-    ctx.println("\t{}.u16[{}] = {}.u32[{}] > 0xFFFF ? 0xFFFF : (uint16_t){}.u32[{}];",
-                ctx.v(ctx.insn.operands[0]), 3 - i, ctx.v(ctx.insn.operands[2]), 3 - i,
-                ctx.v(ctx.insn.operands[2]), 3 - i);
-  }
+  // Same in-place aliasing bug as vpkuhus (vD is often vA or vB). Unsigned min to 0xFFFF, then signed packus is exact.
+  ctx.println(
+      "\tsimde_mm_store_si128((simde__m128i*){}.u16, simde_mm_packus_epi32("
+      "simde_mm_min_epu32(simde_mm_load_si128((simde__m128i*){}.u32), simde_mm_set1_epi32(0xFFFF)), "
+      "simde_mm_min_epu32(simde_mm_load_si128((simde__m128i*){}.u32), simde_mm_set1_epi32(0xFFFF))));",
+      ctx.v(ctx.insn.operands[0]), ctx.v(ctx.insn.operands[2]), ctx.v(ctx.insn.operands[1]));
   return true;
 }
 

@@ -93,6 +93,10 @@ REXCVAR_DEFINE_BOOL(async_shader_compilation, true, "GPU",
                     "pipelines are being prepared.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
+namespace rex::graphics::swap_stats {
+extern std::atomic<uint64_t> g_swaps;  // swap_counter.cpp
+}  // namespace rex::graphics::swap_stats
+
 namespace rex::graphics {
 
 using namespace rex::graphics::xenos;
@@ -958,6 +962,7 @@ bool CommandProcessor::ExecutePacketType3_INTERRUPT(memory::RingBuffer* reader, 
 bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, uint32_t packet,
                                                   uint32_t count) {
   SCOPE_profile_cpu_f("gpu");
+  swap_stats::g_swaps.fetch_add(1, std::memory_order_relaxed);
 
 #ifdef REXGLUE_ENABLE_PERF_COUNTERS
   {

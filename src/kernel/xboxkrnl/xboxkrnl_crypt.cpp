@@ -13,6 +13,7 @@
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 
 #include <algorithm>
+#include <cstring>
 
 #include <rex/kernel/xboxkrnl/private.h>
 #include <rex/logging.h>
@@ -639,14 +640,23 @@ u32 XeKeysHmacShaUsingKey_entry(mapped_void obscured_key, mapped_void inp_1, u32
 }
 
 u32 XeKeysConsolePrivateKeySign_entry(mapped_void hash, mapped_void signature) {
-  REXKRNL_DEBUG("XeKeysConsolePrivateKeySign - stub");
-  return 0;  // Success
+  // Returns BOOL on real hardware (TRUE = signed). The old stub returned 0 = failure.
+  // Write a deterministic (zeroed) XE_CONSOLE_SIGNATURE (0x228 bytes) so signed data is stable.
+  if (signature) {
+    std::memset(signature.host_address(), 0, 0x228);
+  }
+  return 1;
 }
 
 u32 XeKeysConsoleSignatureVerification_entry(mapped_void hash, mapped_void signature,
                                              mapped_void pubkey) {
-  REXKRNL_DEBUG("XeKeysConsoleSignatureVerification - stub");
-  return 0;  // Success (signature valid)
+  // Returns BOOL (TRUE = verified) and writes a non-zero compare result through the
+  // third argument (LONG*). Games that sign their save data check both; the old stub
+  // returned 0, so every signature check failed.
+  if (pubkey) {
+    *reinterpret_cast<rex::be<uint32_t>*>(pubkey.host_address()) = 1;
+  }
+  return 1;
 }
 
 REX_EXPORT_STUB(__imp__XeKeysGetConsoleCertificate);

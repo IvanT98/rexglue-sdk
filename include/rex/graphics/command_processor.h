@@ -44,6 +44,8 @@ enum class ReadbackResolveMode {
   kFast,
   kSome,
   kFull,
+  // Sync readback, except resolves repeated every frame (see readback_resolve_smart_*).
+  kSmart,
 };
 
 struct SwapState {

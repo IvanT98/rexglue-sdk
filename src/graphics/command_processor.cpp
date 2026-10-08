@@ -51,8 +51,20 @@ REXCVAR_DEFINE_STRING(readback_resolve, "none", "GPU",
                       " none: Disable readback (default)\n"
                       " fast: Read previous frame (delayed, copy every frame)\n"
                       " some: Read previous frame (delayed, copy on cache miss)\n"
-                      " full: Immediate sync readback (accurate but stalls)")
-    .allowed({"none", "fast", "some", "full"})
+                      " full: Immediate sync readback (accurate but stalls)\n"
+                      " smart: Sync readback, except resolves repeated every frame, which are read\n"
+                      "        one frame late (or skipped, see readback_resolve_smart_skip_steady)")
+    .allowed({"none", "fast", "some", "full", "smart"})
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_BOOL(readback_resolve_smart_skip_steady, false, "GPU",
+                    "smart readback: do not copy resolves repeated every frame back to guest memory "
+                    "(they are only read by the GPU)")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_INT32(readback_resolve_smart_frames, 8, "GPU",
+                     "smart readback: frames in a row with the same number of resolves to an address "
+                     "before that address counts as repeated every frame")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 REXCVAR_DEFINE_BOOL(readback_resolve_half_pixel_offset, false, "GPU",
@@ -96,6 +108,9 @@ ReadbackResolveMode ParseReadbackResolveMode(std::string_view value) {
   }
   if (value == "full") {
     return ReadbackResolveMode::kFull;
+  }
+  if (value == "smart") {
+    return ReadbackResolveMode::kSmart;
   }
   return ReadbackResolveMode::kDisabled;
 }

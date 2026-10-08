@@ -382,8 +382,20 @@ class D3D12CommandProcessor : public CommandProcessor {
     uint64_t last_used_frame = 0;
   };
   void EvictOldReadbackBuffers(std::unordered_map<uint64_t, ReadbackBuffer>& buffer_map);
+  // "smart" readback: number of resolves per frame to each (address, length). A key whose
+  // per-frame count stayed the same for readback_resolve_smart_frames frames is "steady":
+  // each of its per-frame occurrences is read one frame late from its own buffer pair (or
+  // not copied at all with readback_resolve_smart_skip_steady). Anything else, such as
+  // textures the game builds once and reads on the CPU, is read back synchronously.
+  struct ReadbackResolveTracker {
+    uint64_t frame = 0;
+    uint32_t count = 0;
+    uint32_t count_prev = 0;
+    uint32_t steady_frames = 0;
+  };
+  std::unordered_map<uint64_t, ReadbackResolveTracker> readback_resolve_trackers_;
   static constexpr uint32_t kReadbackBufferSizeIncrement = 16 * 1024 * 1024;
-  static constexpr size_t kMaxReadbackBuffers = 256;
+  static constexpr size_t kMaxReadbackBuffers = 512;  // smart readback: one pair per pass
   static constexpr uint64_t kReadbackBufferEvictionAgeFrames = 60;
   static inline uint32_t AlignReadbackBufferSize(uint32_t size) {
     if (size < 1 * 1024 * 1024) {

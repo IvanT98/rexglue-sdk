@@ -2903,6 +2903,31 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
 
   bool is_scaled = texture_cache_->IsDrawResolutionScaled();
   uint64_t resolve_key = MakeReadbackResolveKey(written_address, written_length);
+  bool smart_delayed = false;
+  if (GetReadbackResolveMode(REXCVAR_GET(d3d12_readback_resolve)) == ReadbackResolveMode::kSmart) {
+    ReadbackResolveTracker& t = readback_resolve_trackers_[resolve_key];
+    if (t.frame != frame_current_) {
+      bool adjacent = t.frame + 1 == frame_current_;
+      if (adjacent && t.count && t.count == t.count_prev) {
+        ++t.steady_frames;
+      } else {
+        t.steady_frames = 0;
+      }
+      t.count_prev = adjacent ? t.count : 0;
+      t.count = 0;
+      t.frame = frame_current_;
+    }
+    uint32_t occurrence = t.count++;
+    int32_t smart_frames = REXCVAR_GET(readback_resolve_smart_frames);
+    smart_delayed = smart_frames >= 0 && occurrence < 8 && occurrence < t.count_prev &&
+                    t.steady_frames >= uint32_t(smart_frames);
+    if (smart_delayed && REXCVAR_GET(readback_resolve_smart_skip_steady)) {
+      return true;
+    }
+    // Physical addresses are below 0x20000000, so key bits 61-63 are free: one buffer pair
+    // per per-frame occurrence, so the delayed read of pass k is last frame's pass k.
+    resolve_key ^= uint64_t(occurrence < 7 ? occurrence : 7) << 61;
+  }
   ReadbackBuffer& rb = readback_buffers_[resolve_key];
   rb.last_used_frame = frame_current_;
 
@@ -3071,7 +3096,8 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
 
   ReadbackResolveMode readback_mode = GetReadbackResolveMode(REXCVAR_GET(d3d12_readback_resolve));
   bool use_delayed_sync =
-      readback_mode == ReadbackResolveMode::kFast || readback_mode == ReadbackResolveMode::kSome;
+      readback_mode == ReadbackResolveMode::kFast || readback_mode == ReadbackResolveMode::kSome ||
+      (readback_mode == ReadbackResolveMode::kSmart && smart_delayed);
   uint32_t read_index = write_index;
   if (use_delayed_sync) {
     read_index = 1 - write_index;
@@ -3362,6 +3388,12 @@ bool D3D12CommandProcessor::BeginSubmission(bool is_guest_command) {
     }
     EvictOldReadbackBuffers(readback_buffers_);
     EvictOldReadbackBuffers(memexport_readback_buffers_);
+    if (!readback_resolve_trackers_.empty() && frame_current_ > kReadbackBufferEvictionAgeFrames) {
+      uint64_t tracker_floor = frame_current_ - kReadbackBufferEvictionAgeFrames;
+      for (auto it = readback_resolve_trackers_.begin(); it != readback_resolve_trackers_.end();) {
+        it = it->second.frame < tracker_floor ? readback_resolve_trackers_.erase(it) : std::next(it);
+      }
+    }
 
     primitive_processor_->BeginFrame();
 

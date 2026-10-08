@@ -21,6 +21,40 @@
 
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 
+#include <atomic>
+#include <bit>
+
+// Rising-edge press counts per guest user and gamepad button, updated on every
+// successful XamInputGetState. Exported so a game exe can react to presses (e.g. a
+// camera toggle) through GetProcAddress without a link dependency or its own
+// polling, and without missing presses shorter than its update interval.
+namespace {
+std::atomic<uint32_t> g_button_presses[4][16];
+std::atomic<uint16_t> g_prev_buttons[4];
+
+void CountButtonPresses(uint32_t user, uint16_t buttons) {
+  if (user >= 4) {
+    return;
+  }
+  uint16_t pressed = buttons & ~g_prev_buttons[user].exchange(buttons, std::memory_order_relaxed);
+  while (pressed) {
+    g_button_presses[user][std::countr_zero(pressed)].fetch_add(1, std::memory_order_relaxed);
+    pressed &= pressed - 1;
+  }
+}
+}  // namespace
+
+#ifdef _WIN32
+// button_mask must be a single XINPUT_GAMEPAD_* bit (e.g. 0x0020 = Back).
+extern "C" __declspec(dllexport) uint32_t rex_input_button_press_count(uint32_t user,
+                                                                       uint32_t button_mask) {
+  if (user >= 4 || button_mask == 0 || button_mask > 0xFFFF || !std::has_single_bit(button_mask)) {
+    return 0;
+  }
+  return g_button_presses[user][std::countr_zero(button_mask)].load(std::memory_order_relaxed);
+}
+#endif
+
 namespace rex {
 namespace kernel {
 namespace xam {
@@ -112,7 +146,11 @@ u32 XamInputGetState_entry(u32 user_index, u32 flags, ppc_ptr_t<X_INPUT_STATE> i
   }
 
   auto* is = input_system();
-  return is->GetState(actual_user_index, input_state);
+  u32 result = is->GetState(actual_user_index, input_state);
+  if (result == X_ERROR_SUCCESS && input_state) {
+    CountButtonPresses(actual_user_index, input_state->gamepad.buttons);
+  }
+  return result;
 }
 
 // https://msdn.microsoft.com/en-us/library/windows/desktop/microsoft.directx_sdk.reference.xinputsetstate(v=vs.85).aspx

@@ -12,6 +12,9 @@
 #include <algorithm>
 #include <cstring>
 #include <utility>
+#include <vector>
+#include <unordered_set>
+#include <mutex>
 
 #if REX_PLATFORM_MAC
 #include <sys/mman.h>
@@ -38,6 +41,10 @@ REXCVAR_DEFINE_BOOL(protect_zero, true, "Memory", "Protect the zero page from re
 
 REXCVAR_DEFINE_BOOL(protect_on_release, false, "Memory",
                     "Protect released memory to prevent accesses");
+
+REXCVAR_DEFINE_BOOL(sysheap_page_pool, false, "Memory",
+                    "Reuse freed single-page system-heap blocks (kernel objects) instead of "
+                    "returning them to the host each time");
 
 REXCVAR_DEFINE_BOOL(scribble_heap, false, "Memory", "Scribble 0xCD into all allocated heap memory");
 
@@ -690,9 +697,57 @@ void Memory::EnablePhysicalMemoryAccessCallbacks(uint32_t physical_address, uint
                                          enable_invalidation_notifications, enable_data_providers);
 }
 
+// Reuse pool for small system-heap allocations.
+// Every kernel object (events, semaphores, ...) does two SystemHeapAlloc calls,
+// each a full guest page reserved+committed from the host and released again on
+// close. Games that create a kernel object per job (e.g. an event per job) can
+// spend a large share of a thread's time in those system calls. With
+// sysheap_page_pool, freed single-page blocks are kept and handed back out.
+namespace {
+struct SysHeapPagePool {
+  std::mutex mutex;
+  std::vector<uint32_t> free_pages;
+  std::unordered_set<uint32_t> pooled;  // addresses that came from the pool path
+  bool enabled = true;
+  bool init = false;
+};
+SysHeapPagePool& sysheap_page_pool_state() {
+  // Intentionally leaked: memory teardown at process exit still frees objects
+  // after static destructors have run, so the pool must never be destroyed.
+  static SysHeapPagePool* p = new SysHeapPagePool();
+  return *p;
+}
+constexpr size_t kSysHeapPoolMaxFree = 16384;  // 64 MB of guest pages at most
+}  // namespace
+
 uint32_t Memory::SystemHeapAlloc(uint32_t size, uint32_t alignment, uint32_t system_heap_flags) {
   // TODO(benvanik): lightweight pool.
   bool is_physical = !!(system_heap_flags & memory::kSystemHeapPhysical);
+  auto& pool = sysheap_page_pool_state();
+  bool poolable = !is_physical && size <= 4096 && alignment <= 4096;
+  if (poolable) {
+    uint32_t reused = 0;
+    {
+      std::lock_guard<std::mutex> lock(pool.mutex);
+      if (!pool.init) {
+        pool.init = true;
+        // NOTE: no file checks here. rex::filesystem::GetExecutableFolder() uses
+        // _get_wpgmptr, which fast-fails (0xC0000409) in tools with a narrow
+        // main() such as rexglue.exe codegen.
+        pool.enabled = REXCVAR_GET(sysheap_page_pool);
+      }
+      poolable = pool.enabled;
+      if (poolable && !pool.free_pages.empty()) {
+        uint32_t address = pool.free_pages.back();
+        pool.free_pages.pop_back();
+        reused = address;
+      }
+    }
+    if (reused) {
+      Zero(reused, 4096);
+      return reused;
+    }
+  }
   auto heap = LookupHeapByType(is_physical, 4096);
   uint32_t address;
   if (!heap->AllocSystemHeap(
@@ -701,12 +756,33 @@ uint32_t Memory::SystemHeapAlloc(uint32_t size, uint32_t alignment, uint32_t sys
     return 0;
   }
   Zero(address, size);
+  if (poolable) {
+    {
+      std::lock_guard<std::mutex> lock(pool.mutex);
+      pool.pooled.insert(address);
+    }
+  }
   return address;
 }
 
 void Memory::SystemHeapFree(uint32_t address, uint32_t* out_region_size) {
   if (!address) {
     return;
+  }
+  {
+    auto& pool = sysheap_page_pool_state();
+    std::lock_guard<std::mutex> lock(pool.mutex);
+    auto it = pool.pooled.find(address);
+    if (it != pool.pooled.end()) {
+      if (pool.free_pages.size() < kSysHeapPoolMaxFree) {
+        pool.free_pages.push_back(address);
+        if (out_region_size) {
+          *out_region_size = 4096;
+        }
+        return;
+      }
+      pool.pooled.erase(it);
+    }
   }
   // TODO(benvanik): lightweight pool.
   auto heap = LookupHeap(address);

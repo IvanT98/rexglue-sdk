@@ -28,6 +28,10 @@
 #include <rex/logging.h>
 #include <rex/math.h>
 
+REXCVAR_DEFINE_BOOL(rt_clamp_edram_range, false, "GPU",
+                    "Never let a render target's estimated EDRAM range wrap past the last tile onto "
+                    "tile 0. Fixes black screens where a pass with an over-estimated height (e.g. a "
+                    "4x MSAA depth-only pass) takes ownership of a render target at base 0.");
 REXCVAR_DEFINE_BOOL(mrt_edram_used_range_clamp_to_min, true, "GPU",
                     "Clamp MRT EDRAM used range to minimum");
 
@@ -656,6 +660,18 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
                                         ? edram_bases_sorted[i + 1].first
                                         : (xenos::kEdramTileCount + edram_bases_sorted[0].first)) -
                                        rt_base);
+  }
+
+  if (REXCVAR_GET(rt_clamp_edram_range)) {
+    // Clamp claimed ranges to the end of the EDRAM. The height estimate is often the
+    // maximum (no usable viewport/scissor bound), and wrapping it onto tile 0 takes ownership
+    // away from render targets that live there although the draw never touches them.
+    for (uint32_t i = 0; i < edram_bases_sorted_count; ++i) {
+      uint32_t rt_base = edram_bases_sorted[i].first;
+      if (rt_base < xenos::kEdramTileCount) {
+        rt_lengths_tiles[i] = std::min(rt_lengths_tiles[i], xenos::kEdramTileCount - rt_base);
+      }
+    }
   }
 
   if (interlock_barrier_only) {

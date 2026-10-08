@@ -27,6 +27,7 @@
 #include <rex/kernel/xboxkrnl/threading.h>
 #include <rex/system/kernel_module.h>
 #include <rex/system/kernel_state.h>
+#include <rex/cvar.h>
 #include <rex/system/function_dispatcher.h>
 #include <chrono>
 #include <thread>
@@ -42,6 +43,10 @@
 #include <rex/system/xsemaphore.h>
 #include <rex/system/xthread.h>
 #include <rex/system/xtimer.h>
+
+REXCVAR_DEFINE_BOOL(notify_startup_all_listeners, false, "Kernel",
+                    "Send the startup sign-in notifications to every system notification listener, "
+                    "not only the first (for games whose save system registers its own listener)");
 
 namespace rex::system {
 
@@ -1091,7 +1096,11 @@ void KernelState::RegisterNotifyListener(XNotifyListener* listener) {
   // Games seem to expect a few notifications on startup, only for the first
   // listener.
   // https://cs.rin.ru/forum/viewtopic.php?f=38&t=60668&hilit=resident+evil+5&start=375
-  if (!has_notified_startup_ && listener->mask() & 0x00000001) {
+  // With notify_startup_all_listeners, every system listener gets them. Some games' save
+  // systems register their own listener and load the signed-in profile only after they see
+  // XN_SYS_SIGNINCHANGED; without it they create a new empty profile on every boot.
+  if ((REXCVAR_GET(notify_startup_all_listeners) || !has_notified_startup_) &&
+      (listener->mask() & 0x00000001)) {
     has_notified_startup_ = true;
     // XN_SYS_UI (on, off)
     listener->EnqueueNotification(0x00000009, 1);

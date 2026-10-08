@@ -390,7 +390,7 @@ u32 KeDelayExecutionThread_entry(u32 processor_mode, u32 alertable, mapped_u64 i
 }
 
 u32 NtYieldExecution_entry() {
-  rex::thread::MaybeYield();
+  rex::thread::BackoffYield();  // game wait loops call this in a tight loop
   return X_STATUS_SUCCESS;
 }
 

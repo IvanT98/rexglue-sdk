@@ -108,6 +108,16 @@ void set_current_thread_name(const std::string_view name);
 // Yields the current thread to the scheduler. Maybe.
 void MaybeYield();
 
+// Sleep for roughly `us` microseconds without burning a core (Windows:
+// high-resolution waitable timer, ~0.1-0.5 ms granularity).
+void ShortSleepUs(uint32_t us);
+
+// Yield for wait loops. The first 16 calls in a row behave like
+// MaybeYield(); after that each call sleeps ~200 us. The streak resets after a
+// 2 ms gap. SwitchToThread() returns at once on an idle many-core CPU, so plain
+// yield loops spun a whole core each.
+void BackoffYield();
+
 // Memory barrier (request - may be ignored).
 void SyncMemory();
 

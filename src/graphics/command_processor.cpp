@@ -1033,12 +1033,9 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
       // Wait.
       if (wait >= 0x100) {
         PrepareForWait();
-        if (!REXCVAR_GET(vsync)) {
-          // User wants it fast and dangerous.
-          rex::thread::MaybeYield();
-        } else {
-          rex::thread::Sleep(std::chrono::milliseconds(wait / 0x100));
-        }
+        // Was MaybeYield (no vsync) or Sleep(wait/0x100 ms), which Windows rounds
+        // up to ~15.6 ms. Short high-resolution sleeps instead.
+        rex::thread::BackoffYield();
         rex::thread::SyncMemory();
         ReturnFromWait();
 
@@ -1047,7 +1044,7 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
           return false;
         }
       } else {
-        rex::thread::MaybeYield();
+        rex::thread::BackoffYield();  // was MaybeYield, which spun the GPU thread
       }
     }
   } while (!matched);

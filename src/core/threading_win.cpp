@@ -89,6 +89,53 @@ void MaybeYield() {
   MemoryBarrier();
 }
 
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
+
+void ShortSleepUs(uint32_t us) {
+  thread_local HANDLE timer = nullptr;
+  thread_local bool tried = false;
+  if (!tried) {
+    tried = true;
+    timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                   TIMER_ALL_ACCESS);
+  }
+  if (!timer) {
+    SwitchToThread();
+    return;
+  }
+  LARGE_INTEGER due;
+  due.QuadPart = -int64_t(us) * 10;  // relative, 100 ns units
+  if (!SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE)) {
+    SwitchToThread();
+    return;
+  }
+  WaitForSingleObject(timer, INFINITE);
+}
+
+void BackoffYield() {
+  thread_local uint32_t streak = 0;
+  thread_local int64_t last_qpc = 0;
+  static const int64_t freq = [] {
+    LARGE_INTEGER f;
+    QueryPerformanceFrequency(&f);
+    return int64_t(f.QuadPart);
+  }();
+  LARGE_INTEGER now;
+  QueryPerformanceCounter(&now);
+  if ((now.QuadPart - last_qpc) * 1000000 / freq > 2000) {
+    streak = 0;
+  }
+  last_qpc = now.QuadPart;
+  if (++streak <= 16) {
+    SwitchToThread();
+  } else {
+    ShortSleepUs(200);
+  }
+  MemoryBarrier();
+}
+
 void SyncMemory() {
   MemoryBarrier();
 }

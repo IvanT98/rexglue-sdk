@@ -188,6 +188,22 @@ void MaybeYield() {
   __sync_synchronize();
 }
 
+void ShortSleepUs(uint32_t us) {
+  struct timespec ts = {0, long(us) * 1000};
+  nanosleep(&ts, nullptr);
+}
+
+void BackoffYield() {
+  thread_local uint32_t streak = 0;
+  if (++streak <= 16) {
+    sched_yield();
+  } else {
+    ShortSleepUs(200);
+    streak = 0;
+  }
+  __sync_synchronize();
+}
+
 void SyncMemory() {
   __sync_synchronize();
 }

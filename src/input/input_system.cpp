@@ -11,6 +11,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <mutex>
+#include <chrono>
 
 #include <rex/dbg.h>
 #include <rex/input/device_assignment.h>
@@ -28,9 +30,69 @@ REXCVAR_DEFINE_STRING(input_backend, "sdl", "Input", "Input backend: sdl, xinput
     .allowed({"sdl", "xinput"});
 
 REXCVAR_DEFINE_BOOL(guide_button, false, "Input", "Enable guide button pass-through");
+REXCVAR_DEFINE_INT32(input_disconnect_grace_ms, 0, "Input",
+                     "Report a pad that drops out as connected (nothing pressed) for up to this many ms "
+                     "after its last successful poll. 0 = report disconnects immediately.");
 namespace rex::input {
 
 namespace {
+
+// Hide brief controller drop-outs from the game.
+// SDL sometimes reports a wired pad removed and re-added ~0.35 s later. The
+// reconnected pad is put back on the same guest user, but the game has already
+// seen "user 0 not connected"; some games then pause behind a reconnect prompt and
+// never recover. For up to input_disconnect_grace_ms after a user's last successful
+// poll, report it as connected with nothing pressed instead.
+struct PadGrace {
+  std::mutex mutex;
+  bool seen[4] = {};
+  std::chrono::steady_clock::time_point last_ok[4];
+  X_INPUT_CAPABILITIES caps[4] = {};
+  bool have_caps[4] = {};
+  uint32_t packet[4] = {};
+  bool ghosting[4] = {};
+};
+PadGrace& pad_grace() {
+  static PadGrace* g = new PadGrace();  // never destroyed (polled until exit)
+  return *g;
+}
+bool PadInGrace(uint32_t user, const char* what) {
+  if (user >= 4) return false;
+  auto& g = pad_grace();
+  std::lock_guard<std::mutex> lock(g.mutex);
+  if (!g.seen[user]) return false;
+  const int64_t grace_ms = REXCVAR_GET(input_disconnect_grace_ms);
+  if (grace_ms <= 0) return false;
+  auto age = std::chrono::duration_cast<std::chrono::milliseconds>(
+                 std::chrono::steady_clock::now() - g.last_ok[user])
+                 .count();
+  if (age > grace_ms) {
+    if (g.ghosting[user]) {
+      REXLOG_WARN("[input] user {} still gone after {} ms, reporting disconnect", user, age);
+      g.ghosting[user] = false;
+      g.seen[user] = false;
+    }
+    return false;
+  }
+  if (!g.ghosting[user]) {
+    g.ghosting[user] = true;
+    REXLOG_WARN("[input] user {} pad dropped out ({}); hiding it from the game for up to {} ms",
+                user, what, grace_ms);
+  }
+  return true;
+}
+void PadOk(uint32_t user, uint32_t packet) {
+  if (user >= 4) return;
+  auto& g = pad_grace();
+  std::lock_guard<std::mutex> lock(g.mutex);
+  if (g.ghosting[user]) {
+    REXLOG_INFO("[input] user {} pad is back", user);
+    g.ghosting[user] = false;
+  }
+  g.seen[user] = true;
+  g.last_ok[user] = std::chrono::steady_clock::now();
+  g.packet[user] = packet;
+}
 
 // Synthetic devices are parked past every physical ordinal so they cannot push
 // a real pad off guest user 0. SlotAssignment routes them by their synthetic
@@ -195,6 +257,14 @@ X_RESULT InputSystem::GetCapabilities(uint32_t user_index, uint32_t flags,
   std::vector<DeviceId> ids;
   assignment_->DevicesForUser(user_index, ids);
   if (ids.empty()) {
+    if (user_index < 4 && PadInGrace(user_index, "caps")) {
+      auto& g = pad_grace();
+      std::lock_guard<std::mutex> lock(g.mutex);
+      if (g.have_caps[user_index]) {
+        *out_caps = g.caps[user_index];
+        return X_ERROR_SUCCESS;
+      }
+    }
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
 
@@ -206,10 +276,15 @@ X_RESULT InputSystem::GetCapabilities(uint32_t user_index, uint32_t flags,
   }
 
   auto* driver = DriverForDevice(chosen);
-  if (!driver) {
-    return X_ERROR_DEVICE_NOT_CONNECTED;
+  X_RESULT result = driver ? driver->GetDeviceCapabilities(chosen, flags, out_caps)
+                           : X_ERROR_DEVICE_NOT_CONNECTED;
+  if (result == X_ERROR_SUCCESS && user_index < 4) {
+    auto& g = pad_grace();
+    std::lock_guard<std::mutex> lock(g.mutex);
+    g.caps[user_index] = *out_caps;
+    g.have_caps[user_index] = true;
   }
-  return driver->GetDeviceCapabilities(chosen, flags, out_caps);
+  return result;
 }
 
 X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
@@ -243,8 +318,18 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
   }
 
   if (!any) {
+    if (PadInGrace(user_index, "state")) {
+      if (out_state) {
+        auto& g = pad_grace();
+        std::lock_guard<std::mutex> lock(g.mutex);
+        *out_state = {};
+        out_state->packet_number = g.packet[user_index];
+      }
+      return X_ERROR_SUCCESS;
+    }
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
+  PadOk(user_index, merged.packet_number);
   if (out_state) {
     *out_state = merged;
   }
@@ -289,7 +374,10 @@ X_RESULT InputSystem::SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration
   if (any_pad) {
     return pad_rumbled ? X_ERROR_SUCCESS : pad_error;
   }
-  return any_synthetic ? X_ERROR_SUCCESS : X_ERROR_DEVICE_NOT_CONNECTED;
+  if (any_synthetic) {
+    return X_ERROR_SUCCESS;
+  }
+  return PadInGrace(user_index, "vibration") ? X_ERROR_SUCCESS : X_ERROR_DEVICE_NOT_CONNECTED;
 }
 
 X_RESULT InputSystem::GetKeystroke(uint32_t user_index, uint32_t flags,
@@ -318,7 +406,10 @@ X_RESULT InputSystem::GetKeystroke(uint32_t user_index, uint32_t flags,
       any_connected = true;
     }
   }
-  return any_connected ? X_ERROR_EMPTY : X_ERROR_DEVICE_NOT_CONNECTED;
+  if (any_connected) {
+    return X_ERROR_EMPTY;
+  }
+  return PadInGrace(user_index, "keystroke") ? X_ERROR_EMPTY : X_ERROR_DEVICE_NOT_CONNECTED;
 }
 
 std::unique_ptr<InputSystem> CreateDefaultInputSystem(bool tool_mode) {

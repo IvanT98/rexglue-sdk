@@ -92,21 +92,24 @@ bool build_vmulfp128(BuilderContext& ctx) {
 
 bool build_vmaddfp(BuilderContext& ctx) {
   ctx.emit_set_flush_mode(true);
+  // Xenon VMX/VMX128 multiply-add is fused (single rounding), like Xenia's MUL_ADD -> vfmadd.
+  // A separate mul+add rounds twice and can give exact zeros where the console keeps a tiny
+  // residual (0/0 NaNs in animation blending made characters vanish).
   ctx.println(
-      "\tsimde_mm_store_ps({}.f32, simde_mm_add_ps(simde_mm_mul_ps(simde_mm_load_ps({}.f32), "
-      "simde_mm_load_ps({}.f32)), simde_mm_load_ps({}.f32)));",
+      "\tsimde_mm_store_ps({}.f32, simde_mm_fmadd_ps(simde_mm_load_ps({}.f32), "
+      "simde_mm_load_ps({}.f32), simde_mm_load_ps({}.f32)));",
       ctx.v(ctx.insn.operands[0]), ctx.v(ctx.insn.operands[1]), ctx.v(ctx.insn.operands[2]),
       ctx.v(ctx.insn.operands[3]));
   return true;
 }
 
 bool build_vnmsubfp(BuilderContext& ctx) {
-  // vnmsubfp: vD = -(vA * vB - vC) - negation done by XOR with sign bit (0x80000000)
+  // vnmsubfp: vD = -(vA * vB - vC) - fused (see vmaddfp above), negation by XOR with the sign bit
   ctx.emit_set_flush_mode(true);
   ctx.println(
       "\tsimde_mm_store_ps({}.f32, "
-      "simde_mm_xor_ps(simde_mm_sub_ps(simde_mm_mul_ps(simde_mm_load_ps({}.f32), "
-      "simde_mm_load_ps({}.f32)), simde_mm_load_ps({}.f32)), "
+      "simde_mm_xor_ps(simde_mm_fmsub_ps(simde_mm_load_ps({}.f32), "
+      "simde_mm_load_ps({}.f32), simde_mm_load_ps({}.f32)), "
       "simde_mm_castsi128_ps(simde_mm_set1_epi32(int(0x80000000)))));",
       ctx.v(ctx.insn.operands[0]), ctx.v(ctx.insn.operands[1]), ctx.v(ctx.insn.operands[2]),
       ctx.v(ctx.insn.operands[3]));

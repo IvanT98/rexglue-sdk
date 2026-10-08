@@ -51,6 +51,13 @@ REXCVAR_DEFINE_STRING(gpu_plugin, "", "GPU",
                       "GPU emulation")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
+REXCVAR_DEFINE_STRING(gpu_backend, "any", "GPU",
+                      "GPU backend for the loaded plugin to use ('d3d12', 'vulkan', or 'any')")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
+REXCVAR_DEFINE_BOOL(dev_overlays, true, "UI",
+                    "Enable the SDK developer overlays (F3/F4/F7/backtick)");
+
 namespace rex {
 
 // --- ReXApp ---
@@ -314,7 +321,7 @@ bool ReXApp::SetupPresentation() {
   OnPreSetup(config_);
 
   if (!config_.graphics && !config_.gpu_plugin.empty()) {
-    config_.graphics = rex::system::LoadGpuPlugin(config_.gpu_plugin);
+    config_.graphics = rex::system::LoadGpuPlugin(config_.gpu_plugin, REXCVAR_GET(gpu_backend));
     if (!config_.graphics) {
       // Fatal by design: no silent headless fallback.
       auto msg =
@@ -394,6 +401,8 @@ void ReXApp::SetupOverlays(rex::ui::Presenter* presenter, rex::ui::ImmediateDraw
   // gated eager font upload in SetImmediateDrawer is skipped (font uploads
   // lazily on the first Draw instead).
   imgui_drawer_->SetPresenterAndImmediateDrawer(presenter, drawer);
+  // SDK overlays (F3 debug, ` console, F4 settings, F7 achievements) only with dev_overlays.
+  if (REXCVAR_GET(dev_overlays)) {
   rex::ui::RegisterBind("bind_debug_overlay", "F3", "Toggle debug overlay", [this] {
     if (debug_overlay_) {
       debug_overlay_.reset();
@@ -423,6 +432,7 @@ void ReXApp::SetupOverlays(rex::ui::Presenter* presenter, rex::ui::ImmediateDraw
       achievements_overlay_ = CreateAchievementsOverlay();
     }
   });
+  }
 
   OnCreateDialogs(imgui_drawer_.get());
 }

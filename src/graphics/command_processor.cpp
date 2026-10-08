@@ -9,6 +9,7 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <atomic>
 #include <algorithm>
 #include <cinttypes>
 #include <cmath>
@@ -162,6 +163,8 @@ void CommandProcessor::CallInThread(std::function<void()> fn) {
     fn();
   } else {
     pending_fns_.push(std::move(fn));
+    // Wake the worker instead of letting it sit out its idle poll.
+    write_ptr_index_event_->Set();
   }
 }
 
@@ -637,7 +640,9 @@ void CommandProcessor::ExecuteIndirectBuffer(uint32_t ptr, uint32_t count) {
   SCOPE_profile_cpu_f("gpu");
 
   // Execute commands!
-  memory::RingBuffer reader(memory_->TranslatePhysical(ptr), count * sizeof(uint32_t));
+  // The capacity must exceed the data by one word, otherwise set_write_offset()
+  // wraps to 0 and the ring looks empty (no packets run).
+  memory::RingBuffer reader(memory_->TranslatePhysical(ptr), count * sizeof(uint32_t) + 4);
   reader.set_write_offset(count * sizeof(uint32_t));
   do {
     if (!ExecutePacket(&reader)) {
@@ -651,7 +656,9 @@ void CommandProcessor::ExecuteIndirectBuffer(uint32_t ptr, uint32_t count) {
 
 void CommandProcessor::ExecutePacket(uint32_t ptr, uint32_t count) {
   // Execute commands!
-  memory::RingBuffer reader(memory_->TranslatePhysical(ptr), count * sizeof(uint32_t));
+  // The capacity must exceed the data by one word, otherwise set_write_offset()
+  // wraps to 0 and the ring looks empty (no packets run).
+  memory::RingBuffer reader(memory_->TranslatePhysical(ptr), count * sizeof(uint32_t) + 4);
   reader.set_write_offset(count * sizeof(uint32_t));
   do {
     if (!ExecutePacket(&reader)) {
@@ -879,11 +886,18 @@ bool CommandProcessor::ExecutePacketType3(memory::RingBuffer* reader, uint32_t p
       break;
     }
 
-    default:
-      REXGPU_INFO("Unimplemented GPU OPCODE: 0x{:02X}\t\tCOUNT: {}\n", opcode, count);
-      assert_always();
+    default: {
+      // Skip the unknown packet's payload and keep going. Returning false made the
+      // caller discard the rest of the command buffer.
+      static std::atomic<uint32_t> unknown_opcode_count{0};
+      uint32_t n = unknown_opcode_count.fetch_add(1, std::memory_order_relaxed);
+      if (n < 32) {
+        REXGPU_WARN("Unimplemented GPU opcode 0x{:02X} (count {}), skipped", opcode, count);
+      }
       reader->AdvanceRead(count * sizeof(uint32_t));
+      result = true;
       break;
+    }
   }
 
   assert_true(reader->read_offset() ==

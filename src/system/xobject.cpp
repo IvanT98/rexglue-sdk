@@ -12,6 +12,7 @@
 #include <vector>
 
 #include <rex/chrono/clock.h>
+#include <rex/logging.h>
 #include <rex/stream.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/util/string_utils.h>  // For TranslateAnsiStringAddress
@@ -393,6 +394,30 @@ object_ref<XObject> XObject::GetNativeObject(KernelState* kernel_state, void* na
     // TODO: assert if the type of the object != as_type
     uint32_t handle = header->wait_list_blink;
     auto object = kernel_state->object_table()->LookupObject<XObject>(handle);
+
+    // Diagnostic only: report a stashed handle that no longer resolves to an
+    // object of the header's type. The object is still returned unchanged.
+    Type expected = Type::Undefined;
+    switch (as_type) {
+      case 0:
+      case 1:
+        expected = Type::Event;
+        break;
+      case 2:
+        expected = Type::Mutant;
+        break;
+      case 5:
+        expected = Type::Semaphore;
+        break;
+    }
+    if (expected != Type::Undefined && (!object || object->type() != expected)) {
+      REXSYS_WARN(
+          "GetNativeObject: stashed handle {:08X} at {:08X} (header type {}) resolves to {}, "
+          "expected type {}",
+          handle, kernel_state->memory()->HostToGuestVirtual(native_ptr), as_type,
+          object ? fmt::format("type {}", object->type()) : std::string("no object"), expected);
+      if (auto l = ::rex::GetLogger()) l->flush();
+    }
 
     // TODO(benvanik): assert nothing has been changed in the struct.
     return object;

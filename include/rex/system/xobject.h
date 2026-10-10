@@ -161,6 +161,10 @@ class XObject {
   const std::string& name() const { return name_; }
   uint32_t guest_object() const { return guest_object_ptr_; }
 
+  // Guest address of the dispatcher header GetNativeObject created this object
+  // for (its handle is stashed there), or 0. Diagnostic only.
+  uint32_t native_stash_address() const;
+
   // Has this object been created for use by the host?
   // Host objects are persisted through reloads/etc.
   bool is_host_object() const { return host_object_; }
@@ -199,6 +203,12 @@ class XObject {
 
   static object_ref<XObject> GetNativeObject(KernelState* kernel_state, void* native_ptr,
                                              int32_t as_type = -1);
+  // The object whose guest structure the SDK allocated at guest_ptr
+  // (CreateNative / SetNativePointer), retained; null if there is none. Unlike
+  // GetNativeObject, it does not depend on a dispatcher header at guest_ptr
+  // (an XEnumerator's structure has none) and never creates an object.
+  static object_ref<XObject> GetObjectByGuestPointer(KernelState* kernel_state,
+                                                     uint32_t guest_ptr);
   template <typename T>
   static object_ref<T> GetNativeObject(KernelState* kernel_state, void* native_ptr,
                                        int32_t as_type = -1);

@@ -203,6 +203,22 @@ X_STATUS ObjectTable::RemoveHandle(X_HANDLE handle) {
 
     REXSYS_NOISY_DEBUG("Removed handle:{:08X} for {}", handle, typeid(*object).name());
 
+    // Diagnostic only: an object GetNativeObject created for guest memory has
+    // no handle the guest knows, yet that memory keeps resolving the stashed
+    // handle; once removed, the number can be reused for another object.
+    if (uint32_t native = object->native_stash_address()) {
+      uint32_t lr = 0;
+      auto* thread = XThread::GetCurrentThread();
+      if (thread && thread->thread_state() && thread->thread_state()->context()) {
+        lr = static_cast<uint32_t>(thread->thread_state()->context()->lr);
+      }
+      REXSYS_WARN(
+          "RemoveHandle: handle {:08X} (type {}) was created for guest memory at {:08X}, which "
+          "still stashes it; removed from guest lr {:08X}",
+          handle, static_cast<uint32_t>(object->type()), native, lr);
+      if (auto l = ::rex::GetLogger()) l->flush();
+    }
+
     // Remove object name from mapping to prevent naming collision.
     if (!object->name().empty()) {
       RemoveNameMapping(object->name());

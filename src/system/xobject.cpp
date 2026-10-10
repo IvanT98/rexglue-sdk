@@ -18,6 +18,9 @@
 #include <rex/system/util/string_utils.h>  // For TranslateAnsiStringAddress
 #include <rex/system/xobject.h>
 // #include <rex/kernel/xboxkrnl/private.h>  // TODO: JIT only
+#include <mutex>
+#include <unordered_map>
+
 #include <rex/system/xenumerator.h>
 #include <rex/system/xevent.h>
 #include <rex/system/xfile.h>
@@ -29,6 +32,40 @@
 #include <rex/system/xthread.h>
 
 namespace rex::system {
+
+namespace {
+// Objects GetNativeObject created for a dispatcher header in guest memory, and
+// that header's guest address. Diagnostic only: the guest never sees these
+// handles, so removing one from the table while the header still stashes it
+// lets the handle number be reused for an unrelated object.
+std::mutex& native_stash_mutex() {
+  static std::mutex* m = new std::mutex();
+  return *m;
+}
+std::unordered_map<const XObject*, uint32_t>& native_stashes() {
+  // Intentionally leaked, like other state that objects freed at exit touch.
+  static auto* m = new std::unordered_map<const XObject*, uint32_t>();
+  return *m;
+}
+}  // namespace
+
+// Guest structures the SDK allocated for an object (SetNativePointer), by guest
+// address: the object's handle, and the object, to erase only its own entry.
+struct GuestObjectEntry {
+  X_HANDLE handle;
+  const XObject* owner;
+};
+std::unordered_map<uint32_t, GuestObjectEntry>& guest_objects() {
+  // Intentionally leaked, like native_stashes().
+  static auto* m = new std::unordered_map<uint32_t, GuestObjectEntry>();
+  return *m;
+}
+
+uint32_t XObject::native_stash_address() const {
+  std::lock_guard<std::mutex> lock(native_stash_mutex());
+  auto it = native_stashes().find(this);
+  return it == native_stashes().end() ? 0 : it->second;
+}
 
 XObject::XObject(Type type) : kernel_state_(nullptr), pointer_ref_count_(1), type_(type) {
   handles_.reserve(10);
@@ -49,6 +86,14 @@ XObject::XObject(KernelState* kernel_state, Type type)
 }
 
 XObject::~XObject() {
+  {
+    std::lock_guard<std::mutex> lock(native_stash_mutex());
+    native_stashes().erase(this);
+    auto it = guest_objects().find(guest_object_ptr_);
+    if (it != guest_objects().end() && it->second.owner == this) {
+      guest_objects().erase(it);
+    }
+  }
   // TODO: these are being asserted true... find out why
   // assert_true(handles_.empty());
   // assert_zero(pointer_ref_count_);
@@ -366,6 +411,30 @@ void XObject::SetNativePointer(uint32_t native_ptr, bool uninitialized) {
   StashHandle(header, handle());
 
   guest_object_ptr_ = native_ptr;
+  if (!handles_.empty()) {
+    std::lock_guard<std::mutex> lock(native_stash_mutex());
+    guest_objects()[native_ptr] = {handles_[0], this};
+  }
+}
+
+object_ref<XObject> XObject::GetObjectByGuestPointer(KernelState* kernel_state,
+                                                     uint32_t guest_ptr) {
+  X_HANDLE handle = 0;
+  {
+    std::lock_guard<std::mutex> lock(native_stash_mutex());
+    auto it = guest_objects().find(guest_ptr);
+    if (it == guest_objects().end()) {
+      return nullptr;
+    }
+    handle = it->second.handle;
+  }
+  // Through the table, which holds a reference while the handle is live; the
+  // guest pointer check rejects a handle number reused since.
+  auto object = kernel_state->object_table()->LookupObject<XObject>(handle);
+  if (!object || object->guest_object() != guest_ptr) {
+    return nullptr;
+  }
+  return object;
 }
 
 object_ref<XObject> XObject::GetNativeObject(KernelState* kernel_state, void* native_ptr,
@@ -468,6 +537,10 @@ object_ref<XObject> XObject::GetNativeObject(KernelState* kernel_state, void* na
     // Stash pointer in struct.
     // FIXME: This assumes the object contains a dispatch header (some don't!)
     StashHandle(header, object->handle());
+    {
+      std::lock_guard<std::mutex> lock(native_stash_mutex());
+      native_stashes()[object] = kernel_state->memory()->HostToGuestVirtual(native_ptr);
+    }
 
     return object_ref<XObject>(object);
   }

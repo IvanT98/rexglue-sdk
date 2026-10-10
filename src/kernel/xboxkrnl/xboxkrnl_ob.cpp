@@ -57,7 +57,10 @@ u32 ObOpenObjectByName_entry(mapped_void obj_attributes_ptr, mapped_void object_
 }
 
 u32 ObOpenObjectByPointer_entry(mapped_void object_ptr, mapped_u32 out_handle_ptr) {
-  auto object = XObject::GetNativeObject<XObject>(REX_KERNEL_STATE(), object_ptr);
+  auto object = XObject::GetObjectByGuestPointer(REX_KERNEL_STATE(), object_ptr.guest_address());
+  if (!object) {
+    object = XObject::GetNativeObject<XObject>(REX_KERNEL_STATE(), object_ptr);
+  }
   if (!object) {
     return X_STATUS_UNSUCCESSFUL;
   }
@@ -161,8 +164,20 @@ u32 ObDereferenceObject_entry(u32 native_ptr) {
     return 0;
   }
 
-  auto object = XObject::GetNativeObject<XObject>(
-      REX_KERNEL_STATE(), REX_KERNEL_MEMORY()->TranslateVirtual(native_ptr));
+  // A structure the SDK allocated for an object (a thread, an enumerator from
+  // XamGetPrivateEnumStructureFromHandle, ...): found by address, since not
+  // every such structure starts with a dispatcher header to stash a handle in.
+  auto object = XObject::GetObjectByGuestPointer(REX_KERNEL_STATE(), native_ptr);
+  if (!object) {
+    // Otherwise only an object GetNativeObject already made for this memory
+    // can have been referenced. Never make one here: it would be released at
+    // once and leave its handle number stashed in guest memory, and the next
+    // dereference would release whatever object has that number by then.
+    auto header = REX_KERNEL_MEMORY()->TranslateVirtual<X_DISPATCH_HEADER*>(native_ptr);
+    if (header->wait_list_flink == kXObjSignature) {
+      object = XObject::GetNativeObject<XObject>(REX_KERNEL_STATE(), header);
+    }
+  }
   if (object) {
     object->ReleaseHandle();
   }

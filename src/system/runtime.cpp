@@ -33,6 +33,10 @@ REXCVAR_DEFINE_STRING(user_data_root, "", "Runtime", "Override user data path");
 REXCVAR_DEFINE_STRING(update_data_root, "", "Runtime", "Override update data path");
 REXCVAR_DEFINE_STRING(cache_root, "", "Runtime", "Override shader cache path");
 REXCVAR_DEFINE_STRING(metadata_root, "", "Runtime", "Override metadata path");
+REXCVAR_DEFINE_BOOL(mount_cache, true, "Runtime",
+                    "Give the guest's cache drive (cache:, the console's utility partition) a "
+                    "host folder, <cache root>/utility_drive. Games that find no cache drive can "
+                    "turn features off (Fight Night Champion: knockdown replays).");
 
 namespace rex {
 
@@ -350,9 +354,21 @@ bool Runtime::SetupVfs() {
     REXSYS_DEBUG("  Registered NullDevice for \\Device\\Harddisk0\\{{Partition0,Cache0,Cache1}}");
   }
 
-  // NOTE: Do NOT register a device for cache: paths
-  // Games handle "device not found" gracefully but don't handle actual device
-  // errors (like NAME_COLLISION) well. Let cache: fail cleanly.
+  // cache: (the utility partition a title mounts with XMountUtilityDrive), as a
+  // host folder. Games that find it already there skip mounting it. With
+  // mount_cache off, cache: has no device and opens fail with "device not
+  // found", which games treat as "no cache drive".
+  if (REXCVAR_GET(mount_cache) && !cache_root_.empty()) {
+    auto cache_path = std::filesystem::absolute(cache_root_ / "utility_drive");
+    auto cache_device = std::make_unique<rex::filesystem::HostPathDevice>("\\CACHE", cache_path,
+                                                                          false);
+    if (cache_device->Initialize() && file_system_->RegisterDevice(std::move(cache_device))) {
+      file_system_->RegisterSymbolicLink("cache:", "\\CACHE");
+      REXSYS_INFO("  Mounted {} at cache:", cache_path.string());
+    } else {
+      REXSYS_ERROR("Runtime::SetupVfs: failed to mount {} at cache:", cache_path.string());
+    }
+  }
 
   return true;
 }

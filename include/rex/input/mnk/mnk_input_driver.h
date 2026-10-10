@@ -25,6 +25,12 @@ namespace rex::input::mnk {
 void SetMouseLookActive(bool active);
 bool IsMouseLookActive();
 
+// Holds or releases a key (a VirtualKey below 256) for a test harness, as if it
+// were pressed on the keyboard. Injected keys count whether or not the window
+// has focus, so a background instance can be driven; with none held, nothing
+// changes.
+void SetInjectedKey(uint16_t vk, bool down);
+
 class MnkInputDriver final : public InputDriver,
                              public rex::ui::WindowInputListener,
                              public rex::ui::WindowListener {

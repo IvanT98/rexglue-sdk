@@ -10,7 +10,9 @@
  */
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <set>
 
 #include <rex/assert.h>
 #include <rex/cvar.h>
@@ -817,6 +819,8 @@ bool GetResolveInfo(const RegisterFile& regs, const memory::Memory& memory,
   y1 = (y1 + 127) >> 8;
 
   auto pa_sc_window_offset = regs.Get<reg::PA_SC_WINDOW_OFFSET>();
+  // For the empty-region error below: the rectangle before offset and scissor.
+  const int32_t vertex_rect[4] = {x0, y0, x1, y1};
 
   // Apply the window offset to the vertices.
   if (regs.Get<reg::PA_SU_SC_MODE_CNTL>().vtx_window_offset_enable) {
@@ -884,7 +888,33 @@ bool GetResolveInfo(const RegisterFile& regs, const memory::Memory& memory,
 
   assert_true(x0 < x1 && y0 < y1);
   if (x0 >= x1 || y0 >= y1) {
-    REXGPU_ERROR("Resolve region is empty");
+    // The inputs, once per distinct set (this repeats every frame). Predicated
+    // tiling gives these too: each tile's pass runs every tile's resolve, and
+    // the window offset moves the other tiles' rectangles out of the scissor.
+    static std::set<std::array<int32_t, 11>> reported;
+    std::array<int32_t, 11> key = {
+        vertex_rect[0],
+        vertex_rect[1],
+        vertex_rect[2],
+        vertex_rect[3],
+        int32_t(scissor.offset[0]),
+        int32_t(scissor.offset[1]),
+        int32_t(scissor.extent[0]),
+        int32_t(scissor.extent[1]),
+        int32_t(regs.Get<reg::PA_SU_SC_MODE_CNTL>().vtx_window_offset_enable),
+        int32_t(pa_sc_window_offset.window_x_offset),
+        int32_t(pa_sc_window_offset.window_y_offset)};
+    if (reported.size() < 256 && reported.insert(key).second) {
+      REXGPU_ERROR(
+          "Resolve region is empty: vertices x {}..{} y {}..{} (vf0 at {:08X}), window offset "
+          "{},{} ({}), scissor {},{} {}x{}",
+          vertex_rect[0], vertex_rect[2], vertex_rect[1], vertex_rect[3],
+          fetch.address * sizeof(uint32_t), int32_t(pa_sc_window_offset.window_x_offset),
+          int32_t(pa_sc_window_offset.window_y_offset), key[8] ? "on" : "off", scissor.offset[0],
+          scissor.offset[1], scissor.extent[0], scissor.extent[1]);
+    } else {
+      REXGPU_ERROR("Resolve region is empty");
+    }
     return false;
   }
 

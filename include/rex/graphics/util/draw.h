@@ -445,6 +445,11 @@ struct ResolveCopyShaderInfo {
 
 extern const ResolveCopyShaderInfo resolve_copy_shader_info[size_t(ResolveCopyShaderIndex::kCount)];
 
+// The resolve_dest_number_format cvar: the full color resolve shaders (kFull8bpp to
+// kFull64bpp) are the variants that pack by the destination number format. Backends
+// read it once when creating the resolve pipelines.
+bool IsResolveDestNumberFormatEnabled();
+
 struct ResolveCopyShaderConstants {
   // When the destination base is not needed (not binding the entire shared
   // memory buffer - with resoluion scaling, for instance), only the

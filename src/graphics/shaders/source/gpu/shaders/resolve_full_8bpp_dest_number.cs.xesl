@@ -1,0 +1,2 @@
+#define XE_RESOLVE_DEST_NUMBER_FORMAT
+#include "resolve_full_8bpp.xesli"

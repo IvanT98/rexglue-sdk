@@ -33,6 +33,18 @@ REXCVAR_DEFINE_BOOL(half_pixel_offset, true, "GPU", "Enable half pixel offset");
 REXCVAR_DEFINE_BOOL(resolve_resolution_scale_fill_half_pixel_offset, true, "GPU",
                     "Fill half pixel offset during resolution scale resolve");
 
+REXCVAR_DEFINE_BOOL(
+    resolve_dest_number_format, false, "GPU",
+    "Pack color resolves by the destination number format (copy_dest_number): signed "
+    "fraction, unsigned and signed integer as well as unsigned fraction, after MSAA "
+    "averaging and the exponent bias, and keep the -32...32 range of k_16_16 and "
+    "k_16_16_16_16 render targets. Resolves whose destination number format differs from "
+    "the render target's encoding take the full (converting) resolve instead of the bitwise "
+    "copy. Without it, full resolves pack every fixed destination as an unsigned fraction "
+    "(an integer destination with exponent bias 10 becomes all 0xFFFF). Takes effect at "
+    "start.")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+
 // Very prominent in 545407F2.
 // DEFINE_bool(
 //     resolve_resolution_scale_fill_half_pixel_offset, true,
@@ -1140,6 +1152,29 @@ bool GetResolveInfo(const RegisterFile& regs, const memory::Memory& memory,
   return true;
 }
 
+// Whether a bitwise copy of a render target holding a format that
+// IsColorResolveFormatBitwiseEquivalent pairs with color_format reads as the
+// destination number format: the bitwise-equivalent fixed formats are stored as
+// unsigned fractions, the float ones as floats.
+static constexpr bool ColorResolveNumberFormatMatches(xenos::ColorFormat color_format,
+                                                      xenos::SurfaceNumberFormat num_format) {
+  switch (color_format) {
+    case xenos::ColorFormat::k_16_FLOAT:
+    case xenos::ColorFormat::k_16_16_FLOAT:
+    case xenos::ColorFormat::k_16_16_16_16_FLOAT:
+    case xenos::ColorFormat::k_32_FLOAT:
+    case xenos::ColorFormat::k_32_32_FLOAT:
+    case xenos::ColorFormat::k_32_32_32_32_FLOAT:
+      return num_format == xenos::SurfaceNumberFormat::kFloat;
+    default:
+      return num_format == xenos::SurfaceNumberFormat::kUnsignedRepeatingFraction;
+  }
+}
+
+bool IsResolveDestNumberFormatEnabled() {
+  return REXCVAR_GET(resolve_dest_number_format);
+}
+
 ResolveCopyShaderIndex ResolveInfo::GetCopyShader(uint32_t draw_resolution_scale_x,
                                                   uint32_t draw_resolution_scale_y,
                                                   ResolveCopyShaderConstants& constants_out,
@@ -1154,7 +1189,10 @@ ResolveCopyShaderIndex ResolveInfo::GetCopyShader(uint32_t draw_resolution_scale
        xenos::IsSingleCopySampleSelected(copy_dest_coordinate_info.copy_sample_select) &&
        xenos::IsColorResolveFormatBitwiseEquivalent(
            xenos::ColorRenderTargetFormat(color_edram_info.format),
-           xenos::ColorFormat(copy_dest_info.copy_dest_format)))) {
+           xenos::ColorFormat(copy_dest_info.copy_dest_format)) &&
+       (!REXCVAR_GET(resolve_dest_number_format) ||
+        ColorResolveNumberFormatMatches(xenos::ColorFormat(copy_dest_info.copy_dest_format),
+                                        copy_dest_info.copy_dest_number)))) {
     if (edram_info.msaa_samples >= xenos::MsaaSamples::k4X) {
       shader = source_is_64bpp ? ResolveCopyShaderIndex::kFast64bpp4xMSAA
                                : ResolveCopyShaderIndex::kFast32bpp4xMSAA;

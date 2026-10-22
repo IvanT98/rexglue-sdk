@@ -79,7 +79,50 @@ namespace shaders {
 #include "../shaders/bytecode/d3d12_5_1/resolve_full_64bpp_scaled_cs.h"
 #include "../shaders/bytecode/d3d12_5_1/resolve_full_8bpp_cs.h"
 #include "../shaders/bytecode/d3d12_5_1/resolve_full_8bpp_scaled_cs.h"
+#include "../shaders/bytecode/d3d12_5_1/resolve_full_16bpp_dest_number_cs.h"
+#include "../shaders/bytecode/d3d12_5_1/resolve_full_16bpp_dest_number_scaled_cs.h"
+#include "../shaders/bytecode/d3d12_5_1/resolve_full_32bpp_dest_number_cs.h"
+#include "../shaders/bytecode/d3d12_5_1/resolve_full_32bpp_dest_number_scaled_cs.h"
+#include "../shaders/bytecode/d3d12_5_1/resolve_full_64bpp_dest_number_cs.h"
+#include "../shaders/bytecode/d3d12_5_1/resolve_full_64bpp_dest_number_scaled_cs.h"
+#include "../shaders/bytecode/d3d12_5_1/resolve_full_8bpp_dest_number_cs.h"
+#include "../shaders/bytecode/d3d12_5_1/resolve_full_8bpp_dest_number_scaled_cs.h"
 }  // namespace shaders
+
+namespace {
+// The full color resolve shaders that pack by the destination number format
+// (resolve_dest_number_format), indexed like kResolveCopyShaders; empty entries keep
+// the default shader.
+struct ResolveCopyShaderCodeDestNumber {
+  const void* unscaled;
+  size_t unscaled_size;
+  const void* scaled;
+  size_t scaled_size;
+};
+const ResolveCopyShaderCodeDestNumber
+    kResolveCopyShadersDestNumber[size_t(draw_util::ResolveCopyShaderIndex::kCount)] = {
+        {},
+        {},
+        {},
+        {},
+        {shaders::resolve_full_8bpp_dest_number_cs, sizeof(shaders::resolve_full_8bpp_dest_number_cs),
+         shaders::resolve_full_8bpp_dest_number_scaled_cs,
+         sizeof(shaders::resolve_full_8bpp_dest_number_scaled_cs)},
+        {shaders::resolve_full_16bpp_dest_number_cs,
+         sizeof(shaders::resolve_full_16bpp_dest_number_cs),
+         shaders::resolve_full_16bpp_dest_number_scaled_cs,
+         sizeof(shaders::resolve_full_16bpp_dest_number_scaled_cs)},
+        {shaders::resolve_full_32bpp_dest_number_cs,
+         sizeof(shaders::resolve_full_32bpp_dest_number_cs),
+         shaders::resolve_full_32bpp_dest_number_scaled_cs,
+         sizeof(shaders::resolve_full_32bpp_dest_number_scaled_cs)},
+        {shaders::resolve_full_64bpp_dest_number_cs,
+         sizeof(shaders::resolve_full_64bpp_dest_number_cs),
+         shaders::resolve_full_64bpp_dest_number_scaled_cs,
+         sizeof(shaders::resolve_full_64bpp_dest_number_scaled_cs)},
+        {},
+};
+}  // namespace
 
 const D3D12RenderTargetCache::ResolveCopyShaderCode
     D3D12RenderTargetCache::kResolveCopyShaders[size_t(
@@ -341,10 +384,16 @@ bool D3D12RenderTargetCache::Initialize() {
   direct_resolve_root_signature_depth_->AddRef();
 
   // Create the resolve copying pipelines.
+  bool resolve_dest_number_format = draw_util::IsResolveDestNumberFormatEnabled();
   for (size_t i = 0; i < size_t(draw_util::ResolveCopyShaderIndex::kCount); ++i) {
     const draw_util::ResolveCopyShaderInfo& resolve_copy_shader_info =
         draw_util::resolve_copy_shader_info[i];
-    const ResolveCopyShaderCode& resolve_copy_shader_code = kResolveCopyShaders[i];
+    ResolveCopyShaderCode resolve_copy_shader_code = kResolveCopyShaders[i];
+    if (resolve_dest_number_format && kResolveCopyShadersDestNumber[i].unscaled) {
+      const ResolveCopyShaderCodeDestNumber& code = kResolveCopyShadersDestNumber[i];
+      resolve_copy_shader_code = {code.unscaled, code.unscaled_size, code.scaled,
+                                  code.scaled_size};
+    }
     // Somewhat verification whether resolve_copy_shaders_ is up to date.
     assert_true(resolve_copy_shader_code.unscaled && resolve_copy_shader_code.unscaled_size &&
                 resolve_copy_shader_code.scaled && resolve_copy_shader_code.scaled_size);

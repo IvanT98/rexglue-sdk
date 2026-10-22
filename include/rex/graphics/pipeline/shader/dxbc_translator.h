@@ -786,8 +786,9 @@ class DxbcShaderTranslator : public ShaderTranslator {
   // Performs alpha to coverage if necessary, for RTV, writing to oMask, and for
   // ROV, updating the low (coverage) bits of system_temp_rov_params_.x. Done
   // manually even for RTV to maintain the guest dithering pattern and because
-  // alpha can be exponent-biased.
-  void CompletePixelShader_AlphaToMask();
+  // alpha can be exponent-biased. With alpha_test_pass_temp (RTV only), its X
+  // (UINT32_MAX if the alpha test passed, 0 if failed) masks the coverage.
+  void CompletePixelShader_AlphaToMask(uint32_t alpha_test_pass_temp = UINT32_MAX);
   void CompletePixelShader_WriteToRTVs();
   void CompletePixelShader_DSV_DepthTo24Bit();
   void CompletePixelShader_WriteToROV();

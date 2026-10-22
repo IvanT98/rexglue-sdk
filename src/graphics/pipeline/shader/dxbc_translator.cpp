@@ -24,6 +24,9 @@
 #include <rex/math.h>
 #include <rex/ui/graphics_provider.h>
 
+REXCVAR_DEFINE_BOOL(alpha_test_via_coverage, false, "GPU/Shader",
+                    "Without ROV, fail the alpha test by clearing the pixel shader's output "
+                    "coverage instead of discarding the pixel");
 REXCVAR_DEFINE_BOOL(dxbc_switch, true, "GPU/Shader", "Use switch statements in DXBC");
 
 REXCVAR_DEFINE_BOOL(dxbc_source_map, false, "GPU/Shader", "Generate source maps for DXBC");

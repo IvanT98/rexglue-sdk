@@ -12,12 +12,15 @@
 #include <cstdint>
 
 #include <rex/assert.h>
+#include <rex/cvar.h>
 #include <rex/graphics/flags.h>
 #include <rex/graphics/pipeline/render_target/cache.h>
 #include <rex/graphics/pipeline/shader/dxbc_translator.h>
 #include <rex/graphics/pipeline/texture/cache.h>
 #include <rex/graphics/util/draw.h>
 #include <rex/math.h>
+
+REXCVAR_DECLARE(bool, alpha_test_via_coverage);
 
 namespace rex::graphics {
 using namespace ucode;
@@ -1709,7 +1712,7 @@ void DxbcShaderTranslator::CompletePixelShader_AlphaToMaskSample(
   }
 }
 
-void DxbcShaderTranslator::CompletePixelShader_AlphaToMask() {
+void DxbcShaderTranslator::CompletePixelShader_AlphaToMask(uint32_t alpha_test_pass_temp) {
   // Check if alpha to coverage can be done at all in this shader.
   if (!current_shader().writes_color_target(0) || IsForceEarlyDepthStencilGlobalFlagEnabled()) {
     return;
@@ -1718,7 +1721,9 @@ void DxbcShaderTranslator::CompletePixelShader_AlphaToMask() {
   if (!edram_rov_used_) {
     // Initialize the output coverage for the case if alpha to mask is not
     // enabled - it needs to be written on every execution path.
-    a_.OpMov(dxbc::Dest::OMask(), dxbc::Src::LU(UINT32_MAX));
+    a_.OpMov(dxbc::Dest::OMask(), alpha_test_pass_temp != UINT32_MAX
+                                      ? dxbc::Src::R(alpha_test_pass_temp, dxbc::Src::kXXXX)
+                                      : dxbc::Src::LU(UINT32_MAX));
   }
 
   // Check if alpha to coverage is enabled.
@@ -1806,7 +1811,14 @@ void DxbcShaderTranslator::CompletePixelShader_AlphaToMask() {
     a_.OpRetC(false, temp_x_src);
   } else {
     dxbc::Src coverage_src(dxbc::Src::R(coverage_temp, coverage_temp_component));
-    a_.OpDiscard(false, coverage_src);
+    if (alpha_test_pass_temp != UINT32_MAX) {
+      // No discard: samples failing the alpha test or alpha to coverage get no
+      // coverage.
+      a_.OpAnd(dxbc::Dest::R(coverage_temp, 1 << coverage_temp_component), coverage_src,
+               dxbc::Src::R(alpha_test_pass_temp, dxbc::Src::kXXXX));
+    } else {
+      a_.OpDiscard(false, coverage_src);
+    }
     a_.OpMov(dxbc::Dest::OMask(), coverage_src);
   }
 
@@ -2642,6 +2654,16 @@ void DxbcShaderTranslator::CompletePixelShader() {
       PopSystemTemp();
     }
 
+    // Without ROV, alpha_test_via_coverage fails the alpha test by clearing the
+    // output coverage instead of discarding (a discarding pixel shader writing
+    // only stencil to a 4x MSAA target hangs NVIDIA GPUs).
+    // X - UINT32_MAX if the alpha test passed, 0 if failed.
+    uint32_t alpha_test_pass_temp = UINT32_MAX;
+    if (!edram_rov_used_ && REXCVAR_GET(alpha_test_via_coverage)) {
+      alpha_test_pass_temp = PushSystemTemp();
+      a_.OpMov(dxbc::Dest::R(alpha_test_pass_temp, 0b0001), dxbc::Src::LU(UINT32_MAX));
+    }
+
     // Alpha test.
     // X - mask, then masked result (SGPR for loading, VGPR for masking).
     // Y - operation result (SGPR for mask operations, VGPR for alpha
@@ -2730,6 +2752,9 @@ void DxbcShaderTranslator::CompletePixelShader() {
       // Discard the pixel if it has failed the test.
       if (edram_rov_used_) {
         a_.OpRetC(false, alpha_test_mask_src);
+      } else if (alpha_test_pass_temp != UINT32_MAX) {
+        a_.OpMovC(dxbc::Dest::R(alpha_test_pass_temp, 0b0001), alpha_test_mask_src,
+                  dxbc::Src::LU(UINT32_MAX), dxbc::Src::LU(0));
       } else {
         a_.OpDiscard(false, alpha_test_mask_src);
       }
@@ -2740,7 +2765,11 @@ void DxbcShaderTranslator::CompletePixelShader() {
     PopSystemTemp();
 
     // Discard samples with alpha to coverage.
-    CompletePixelShader_AlphaToMask();
+    CompletePixelShader_AlphaToMask(alpha_test_pass_temp);
+    if (alpha_test_pass_temp != UINT32_MAX) {
+      // Release alpha_test_pass_temp.
+      PopSystemTemp();
+    }
 
     if (edram_rov_used_) {
       // Close the render target 0 written check.

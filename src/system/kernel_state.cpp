@@ -800,6 +800,7 @@ object_ref<UserModule> KernelState::LoadUserModule(const std::string_view raw_na
           auto lib_it = module_libraries_.find(lib_key);
           assert_true(lib_it != module_libraries_.end());
           lib_it->second = std::move(library_local);
+          module->set_recompiled_key(lib_key);
           wired_recomp = true;
         }
       }
@@ -858,7 +859,10 @@ void KernelState::UnloadUserModule(const object_ref<UserModule>& module, bool ca
   {
     auto global_lock = global_critical_region_.Acquire();
 
-    auto recomp = FindRecompiledModule(module->path());
+    // By the key stored at load: module->path() is the VFS path and never matches it, which
+    // left the library registered and refused the next load of the same module.
+    auto recomp = FindRecompiledModule(module->recompiled_key().empty() ? module->path()
+                                                                        : module->recompiled_key());
     if (recomp) {
       const std::string& key = recomp->guest_path;
       auto cleared_range = function_dispatcher_->UnregisterModule(key);

@@ -59,6 +59,11 @@ class UserModule : public XModule {
   bool is_executable() const { return processor_module_->is_executable(); }
   bool is_dll_module() const { return is_dll_module_; }
 
+  // The recompiled-module registry key this module was wired under at load, or "" if none.
+  // path() is the VFS path (\Device\...), which does not normalise to that key.
+  const std::string& recompiled_key() const { return recompiled_key_; }
+  void set_recompiled_key(std::string key) { recompiled_key_ = std::move(key); }
+
   uint32_t entry_point() const { return entry_point_; }
   uint32_t stack_size() const { return stack_size_; }
 
@@ -96,6 +101,7 @@ class UserModule : public XModule {
 
   std::string name_;
   std::string path_;
+  std::string recompiled_key_;
 
   uint32_t guest_xex_header_ = 0;
   ModuleFormat module_format_ = kModuleFormatUndefined;

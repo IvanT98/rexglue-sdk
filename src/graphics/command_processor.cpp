@@ -37,6 +37,9 @@
 #include <rex/system/user_module.h>
 
 REXCVAR_DEFINE_BOOL(vsync, true, "GPU", "Enable vertical sync");
+REXCVAR_DEFINE_BOOL(gpu_type0_bulk_register_writes, false, "GPU",
+                    "Write a type-0 packet's run of registers through the bulk path (shader "
+                    "constant ranges copied at once) instead of one register at a time");
 
 REXCVAR_DEFINE_BOOL(clear_memory_page_state, true, "GPU",
                     "Refresh page-valid state from GPU-written memory at frame end. "
@@ -392,7 +395,10 @@ void CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
 
   // Volatile for the WAIT_REG_MEM loop.
   const_cast<volatile uint32_t&>(regs.values[index]) = value;
-  if (!regs.GetRegisterInfo(index)) {
+  // The lookup is a large sparse switch run for every register write; only do
+  // it when its debug line can be written.
+  if (auto* gpu_log = ::rex::GetLoggerRaw(::rex::log::gpu());
+      gpu_log && gpu_log->should_log(spdlog::level::debug) && !regs.GetRegisterInfo(index)) {
     REXGPU_DEBUG("GPU: Write to unknown register ({:04X} = {:08X})", index, value);
   }
 
@@ -743,6 +749,13 @@ bool CommandProcessor::ExecutePacketType0(memory::RingBuffer* reader, uint32_t p
 
   uint32_t base_index = (packet & 0x7FFF);
   uint32_t write_one_reg = (packet >> 15) & 0x1;
+  if (!write_one_reg && REXCVAR_GET(gpu_type0_bulk_register_writes)) {
+    // A run of consecutive registers (shader constants, mostly): the backend's
+    // bulk path copies constant ranges at once and writes other ranges one by
+    // one, as LOAD_ALU_CONSTANT and SET_CONSTANT do.
+    WriteRegisterRangeFromRing(reader, base_index, count);
+    return true;
+  }
   for (uint32_t m = 0; m < count; m++) {
     uint32_t reg_data = reader->ReadAndSwap<uint32_t>();
     uint32_t target_index = write_one_reg ? base_index : base_index + m;

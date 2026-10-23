@@ -170,6 +170,9 @@ class CommandProcessor {
   virtual void MakeCoherent();
   virtual void PrepareForWait();
   virtual void ReturnFromWait();
+  // Called on every turn of the command processor's wait loops (out of commands, WAIT_REG_MEM),
+  // so it must be cheap when there is nothing to do.
+  virtual void PollWhileWaiting() {}
 
   uint32_t ExecutePrimaryBuffer(uint32_t start_index, uint32_t end_index);
   virtual void OnPrimaryBufferEnd() {}

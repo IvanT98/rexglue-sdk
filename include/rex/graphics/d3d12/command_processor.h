@@ -212,6 +212,8 @@ class D3D12CommandProcessor : public CommandProcessor {
 
   void OnPrimaryBufferEnd() override;
 
+  void PollWhileWaiting() override;
+
   Shader* LoadShader(xenos::ShaderType shader_type, uint32_t guest_address,
                      const uint32_t* host_address, uint32_t dword_count) override;
 
@@ -424,6 +426,13 @@ class D3D12CommandProcessor : public CommandProcessor {
   uint64_t NormalizeOcclusionSamples(uint64_t samples) const;
   void WriteGuestOcclusionResult(xenos::xe_gpu_depth_sample_counts* sample_counts,
                                  uint64_t samples);
+  // occlusion_query_snapshot: the running segment's host query, ended (and resolved) at every ZPD
+  // event and at the end of every submission, then begun again.
+  void ExecuteOcclusionSnapshotEvent(uint32_t sample_count_address);
+  void EndOcclusionSnapshotSegment();
+  void BeginOcclusionSnapshotSegment();
+  // Writes the events whose segments the GPU has finished (never waits).
+  void RetireOcclusionSnapshots();
   void InvalidateAllVertexBufferResidency();
   void InvalidateVertexBufferResidency(uint32_t vfetch_index);
   void InvalidateVertexBufferResidencyRange(uint32_t first_vfetch, uint32_t last_vfetch);
@@ -671,6 +680,22 @@ class D3D12CommandProcessor : public CommandProcessor {
     uint32_t host_index = UINT32_MAX;
     bool valid = false;
   } active_occlusion_query_;
+  struct OcclusionSnapshotSegment {
+    uint32_t host_index;
+    uint64_t submission;
+  };
+  struct OcclusionSnapshotEvent {
+    uint32_t sample_count_address;
+    // The event's value is the total of this many segments.
+    uint64_t segments_through;
+  };
+  std::deque<OcclusionSnapshotSegment> occlusion_snapshot_segments_;
+  std::deque<OcclusionSnapshotEvent> occlusion_snapshot_events_;
+  uint64_t occlusion_snapshot_segments_ended_ = 0;
+  uint64_t occlusion_snapshot_segments_summed_ = 0;
+  uint64_t occlusion_snapshot_total_ = 0;
+  // A segment was cut by the end of a submission and continues in the next one.
+  bool occlusion_snapshot_resume_ = false;
   struct VertexBufferState {
     uint32_t address = UINT32_MAX;
     uint32_t size = UINT32_MAX;

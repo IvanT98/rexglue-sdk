@@ -67,6 +67,13 @@ REXCVAR_DEFINE_INT32(readback_resolve_smart_frames, 8, "GPU",
                      "before that address counts as repeated every frame")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
+REXCVAR_DEFINE_INT32(readback_resolve_smart_period, 1, "GPU",
+                     "smart readback: largest number of frames between two frames that resolve to "
+                     "an address for it to count as repeated (1: every frame; 2 also catches "
+                     "resolves alternated between two buffers)")
+    .range(1, 8)
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 REXCVAR_DEFINE_BOOL(readback_resolve_half_pixel_offset, false, "GPU",
                     "When draw resolution scaling is active, sample from the center of each "
                     "scaled block during resolve readback downscale")
@@ -86,6 +93,13 @@ REXCVAR_DEFINE_INT32(query_occlusion_fake_sample_count, 1000, "GPU",
                      "Fake sample count for occlusion queries")
     .range(1, 100000)
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_BOOL(occlusion_query_snapshot, false, "GPU",
+                    "D3D12 occlusion queries: one host query runs from the first ZPD event on, and "
+                    "every ZPD event writes the running sample total (as Xenos does), once the GPU "
+                    "has finished the draws before it. For games whose query begin and end go to "
+                    "different addresses (per predicated tile), which the paired model drops")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 REXCVAR_DEFINE_BOOL(async_shader_compilation, true, "GPU",
                     "Compile shaders and create pipelines asynchronously in background "
@@ -248,6 +262,7 @@ void CommandProcessor::WorkerThreadMain() {
                             std::chrono::milliseconds(wait_time_ms));
         }
 
+        PollWhileWaiting();
         rex::thread::MaybeYield();
         loop_count++;
         write_ptr_index = write_ptr_index_.load();
@@ -1067,6 +1082,7 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
       // Wait.
       if (wait >= 0x100) {
         PrepareForWait();
+        PollWhileWaiting();
         // Was MaybeYield (no vsync) or Sleep(wait/0x100 ms), which Windows rounds
         // up to ~15.6 ms. Short high-resolution sleeps instead.
         rex::thread::BackoffYield();
@@ -1078,6 +1094,7 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
           return false;
         }
       } else {
+        PollWhileWaiting();
         rex::thread::BackoffYield();  // was MaybeYield, which spun the GPU thread
       }
     }

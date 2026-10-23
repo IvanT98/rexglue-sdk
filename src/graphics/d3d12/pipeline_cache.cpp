@@ -3100,7 +3100,9 @@ void PipelineCache::StorageWriteThread() {
         storage_write_flush_pipelines_ = false;
         flush_pipelines = true;
       }
-      if (!shader && !write_pipeline) {
+      // Flush before sleeping, or the last records of a burst stay in the
+      // stdio buffer until the next request and die with a killed process.
+      if (!shader && !write_pipeline && !flush_shaders && !flush_pipelines) {
         storage_write_request_cond_.wait(lock);
         continue;
       }

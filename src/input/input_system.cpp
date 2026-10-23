@@ -10,9 +10,10 @@
  */
 
 #include <algorithm>
-#include <cmath>
-#include <mutex>
 #include <chrono>
+#include <cmath>
+#include <cstring>
+#include <mutex>
 
 #include <rex/dbg.h>
 #include <rex/input/device_assignment.h>
@@ -25,6 +26,7 @@
 #include <rex/input/state_merge.h>
 #include <rex/input/xinput/xinput_input_driver.h>
 #include <rex/logging.h>
+#include <rex/system/kernel_state.h>
 
 REXCVAR_DEFINE_STRING(input_backend, "sdl", "Input", "Input backend: sdl, xinput")
     .allowed({"sdl", "xinput"});
@@ -33,6 +35,15 @@ REXCVAR_DEFINE_BOOL(guide_button, false, "Input", "Enable guide button pass-thro
 REXCVAR_DEFINE_INT32(input_disconnect_grace_ms, 0, "Input",
                      "Report a pad that drops out as connected (nothing pressed) for up to this many ms "
                      "after its last successful poll. 0 = report disconnects immediately.");
+
+REXCVAR_DEFINE_BOOL(vibration, true, "Input", "Enable controller vibration");
+
+REXCVAR_DEFINE_DOUBLE(left_stick_deadzone_percentage, 0.0, "Input",
+                      "Deadzone applied to the left stick, as a fraction of its range")
+    .range(0.0, 1.0);
+REXCVAR_DEFINE_DOUBLE(right_stick_deadzone_percentage, 0.0, "Input",
+                      "Deadzone applied to the right stick, as a fraction of its range")
+    .range(0.0, 1.0);
 namespace rex::input {
 
 namespace {
@@ -99,6 +110,9 @@ void PadOk(uint32_t user, uint32_t packet) {
 // flag and never reads this value.
 constexpr uint32_t kSyntheticOrdinal = UINT32_MAX;
 
+// XN_SYS_INPUTDEVICESCHANGED
+constexpr uint32_t kXNotificationSystemInputDevicesChanged = 0x00000012;
+
 }  // namespace
 
 InputSystem::InputSystem(rex::ui::Window* window) : window_(window) {}
@@ -110,7 +124,7 @@ X_STATUS InputSystem::Setup() {
 }
 
 void InputSystem::Shutdown() {
-  std::lock_guard<std::mutex> lock(state_mutex_);
+  std::lock_guard<std::recursive_mutex> lock(state_mutex_);
   // device_owners_ holds raw driver pointers.
   devices_.clear();
   device_owners_.clear();
@@ -135,7 +149,7 @@ void InputSystem::SetActiveCallback(std::function<bool()> callback) {
 }
 
 void InputSystem::SetDeviceAssignment(std::unique_ptr<DeviceAssignment> assignment) {
-  std::lock_guard<std::mutex> lock(state_mutex_);
+  std::lock_guard<std::recursive_mutex> lock(state_mutex_);
   assignment_ = std::move(assignment);
   if (assignment_) {
     assignment_->OnDevicesChanged(devices_);
@@ -248,18 +262,36 @@ const DeviceInfo* InputSystem::DeviceInfoFor(DeviceId id) const {
   return nullptr;
 }
 
+DeviceId InputSystem::ChooseDeviceForUser(uint32_t user_index) const {
+  if (!assignment_) {
+    return DeviceId::kInvalid;
+  }
+  std::vector<DeviceId> ids;
+  assignment_->DevicesForUser(user_index, ids);
+  if (ids.empty()) {
+    return DeviceId::kInvalid;
+  }
+  // Prefer the pad in hand, so button glyphs follow it rather than whichever
+  // device enumerated first.
+  DeviceId chosen = active_devices_.Active(user_index);
+  if (std::find(ids.begin(), ids.end(), chosen) == ids.end()) {
+    chosen = ids.front();
+  }
+  return chosen;
+}
+
 X_RESULT InputSystem::GetCapabilities(uint32_t user_index, uint32_t flags,
                                       X_INPUT_CAPABILITIES* out_caps) {
   SCOPE_profile_cpu_f("hid");
-  std::lock_guard<std::mutex> lock(state_mutex_);
+  std::lock_guard<std::recursive_mutex> lock(state_mutex_);
   if (!out_caps || !assignment_) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
 
   RefreshDevices();
-  std::vector<DeviceId> ids;
-  assignment_->DevicesForUser(user_index, ids);
-  if (ids.empty()) {
+  DeviceId chosen = ChooseDeviceForUser(user_index);
+  auto* driver = DriverForDevice(chosen);
+  if (!driver) {
     if (user_index < 4 && PadInGrace(user_index, "caps")) {
       auto& g = pad_grace();
       std::lock_guard<std::mutex> lock(g.mutex);
@@ -270,17 +302,7 @@ X_RESULT InputSystem::GetCapabilities(uint32_t user_index, uint32_t flags,
     }
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
-
-  // Prefer the pad in hand, so button glyphs follow it rather than whichever
-  // device enumerated first.
-  DeviceId chosen = active_devices_.Active(user_index);
-  if (std::find(ids.begin(), ids.end(), chosen) == ids.end()) {
-    chosen = ids.front();
-  }
-
-  auto* driver = DriverForDevice(chosen);
-  X_RESULT result = driver ? driver->GetDeviceCapabilities(chosen, flags, out_caps)
-                           : X_ERROR_DEVICE_NOT_CONNECTED;
+  X_RESULT result = driver->GetDeviceCapabilities(chosen, flags, out_caps);
   if (result == X_ERROR_SUCCESS && user_index < 4) {
     auto& g = pad_grace();
     std::lock_guard<std::mutex> lock(g.mutex);
@@ -290,9 +312,71 @@ X_RESULT InputSystem::GetCapabilities(uint32_t user_index, uint32_t flags,
   return result;
 }
 
+void InputSystem::UpdateConnectedUser(uint32_t user_index, bool connected) {
+  if (user_index >= kMaxGuestUsers || connected_users_.test(user_index) == connected) {
+    return;
+  }
+  connected_users_.set(user_index, connected);
+  if (connected) {
+    REXLOG_INFO("New controller connected to slot {}.", user_index);
+  } else {
+    REXLOG_INFO("Controller disconnected from slot {}.", user_index);
+  }
+
+  // Titles poll capabilities off this rather than every frame, so without it
+  // a pad plugged in mid-game is never noticed.
+  if (auto* kernel_state = REX_KERNEL_STATE()) {
+    kernel_state->BroadcastNotification(kXNotificationSystemInputDevicesChanged, 0);
+  }
+
+  if (!connected) {
+    user_max_joystick_value_[user_index] = {};
+    consumed_buttons_[user_index] = 0;
+    return;
+  }
+
+  // Deadzone percentages scale against the device's own range.
+  DeviceId chosen = ChooseDeviceForUser(user_index);
+  auto* driver = DriverForDevice(chosen);
+  if (!driver) {
+    return;
+  }
+  X_INPUT_CAPABILITIES caps = {};
+  if (driver->GetDeviceCapabilities(chosen, 0, &caps) != X_ERROR_SUCCESS) {
+    return;
+  }
+  user_max_joystick_value_[user_index] = {{caps.gamepad.thumb_lx, caps.gamepad.thumb_ly},
+                                          {caps.gamepad.thumb_rx, caps.gamepad.thumb_ry}};
+}
+
 X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
   SCOPE_profile_cpu_f("hid");
-  std::lock_guard<std::mutex> lock(state_mutex_);
+  std::lock_guard<std::recursive_mutex> lock(state_mutex_);
+
+  // A dialog owns the controller.
+  if (ui_input_blockers_.load() > 0) {
+    if (out_state) {
+      std::memset(out_state, 0, sizeof(*out_state));
+    }
+    return X_ERROR_SUCCESS;
+  }
+
+  X_RESULT result = GetStateForUI(user_index, out_state);
+
+  if (result == X_ERROR_SUCCESS && out_state && user_index < kMaxGuestUsers &&
+      consumed_buttons_[user_index] != 0) {
+    const uint16_t buttons = out_state->gamepad.buttons;
+    // Each button leaves the mask once the player lets go of it.
+    consumed_buttons_[user_index] &= buttons;
+    out_state->gamepad.buttons = static_cast<uint16_t>(buttons & ~consumed_buttons_[user_index]);
+  }
+
+  return result;
+}
+
+X_RESULT InputSystem::GetStateForUI(uint32_t user_index, X_INPUT_STATE* out_state) {
+  SCOPE_profile_cpu_f("hid");
+  std::lock_guard<std::recursive_mutex> lock(state_mutex_);
   if (!assignment_) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
@@ -331,25 +415,112 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
       }
       return X_ERROR_SUCCESS;
     }
+    UpdateConnectedUser(user_index, false);
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
   PadOk(user_index, merged.packet_number);
+  UpdateConnectedUser(user_index, true);
+  AdjustDeadzoneLevels(user_index, &merged.gamepad);
+  if (static_cast<uint16_t>(merged.gamepad.buttons) != 0 && user_index < kMaxGuestUsers) {
+    last_used_user_ = user_index;
+  }
   if (out_state) {
     *out_state = merged;
   }
   return X_ERROR_SUCCESS;
 }
 
+void InputSystem::AddUIInputBlocker() {
+  ui_input_blockers_.fetch_add(1);
+}
+
+void InputSystem::RemoveUIInputBlocker() {
+  std::lock_guard<std::recursive_mutex> lock(state_mutex_);
+  // Whatever is held right now stays masked until released, so the press that
+  // dismissed the dialog is not also read as a press in the game.
+  X_INPUT_STATE state = {};
+  for (uint32_t user_index = 0; user_index < kMaxGuestUsers; user_index++) {
+    if (GetStateForUI(user_index, &state) == X_ERROR_SUCCESS) {
+      consumed_buttons_[user_index] |= static_cast<uint16_t>(state.gamepad.buttons);
+    }
+  }
+
+  ui_input_blockers_.fetch_sub(1);
+}
+
+bool InputSystem::GetVibrationEnabled() const {
+  return REXCVAR_GET(vibration);
+}
+
+void InputSystem::ToggleVibration() {
+  std::lock_guard<std::recursive_mutex> lock(state_mutex_);
+  REXCVAR_SET(vibration, !REXCVAR_GET(vibration));
+  // The guest's next SetState may never come while a motor is running.
+  X_INPUT_VIBRATION silence = {};
+  for (uint32_t user_index = 0; user_index < kMaxGuestUsers; user_index++) {
+    SetState(user_index, &silence);
+  }
+}
+
+void InputSystem::AdjustDeadzoneLevels(uint32_t user_index, X_INPUT_GAMEPAD* gamepad) const {
+  if (user_index >= kMaxGuestUsers || !gamepad) {
+    return;
+  }
+
+  // Radial: the cutoff follows the stick's angle, so a diagonal is not held to
+  // a larger displacement than a cardinal push.
+  auto apply = [](double percentage, const JoystickValue& max, int16_t& axis_x, int16_t& axis_y) {
+    if (percentage <= 0.0 || percentage >= 1.0) {
+      return;
+    }
+    const double deadzone_x = max.first * percentage;
+    const double deadzone_y = max.second * percentage;
+    const double theta = std::atan2(static_cast<double>(axis_y), static_cast<double>(axis_x));
+    const double cutoff_x = std::cos(theta) * deadzone_x;
+    const double cutoff_y = std::sin(theta) * deadzone_y;
+    if (axis_x > -cutoff_x && axis_x < cutoff_x) {
+      axis_x = 0;
+    }
+    if (axis_y > -cutoff_y && axis_y < cutoff_y) {
+      axis_y = 0;
+    }
+  };
+
+  const auto& maxima = user_max_joystick_value_[user_index];
+  int16_t lx = gamepad->thumb_lx;
+  int16_t ly = gamepad->thumb_ly;
+  apply(REXCVAR_GET(left_stick_deadzone_percentage), maxima.first, lx, ly);
+  gamepad->thumb_lx = lx;
+  gamepad->thumb_ly = ly;
+
+  int16_t rx = gamepad->thumb_rx;
+  int16_t ry = gamepad->thumb_ry;
+  apply(REXCVAR_GET(right_stick_deadzone_percentage), maxima.second, rx, ry);
+  gamepad->thumb_rx = rx;
+  gamepad->thumb_ry = ry;
+}
+
+X_INPUT_VIBRATION InputSystem::ModifyVibrationLevel(const X_INPUT_VIBRATION* vibration) const {
+  X_INPUT_VIBRATION modified = *vibration;
+  if (!REXCVAR_GET(vibration)) {
+    modified.left_motor_speed = 0;
+    modified.right_motor_speed = 0;
+  }
+  return modified;
+}
+
 X_RESULT InputSystem::SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration) {
   SCOPE_profile_cpu_f("hid");
-  std::lock_guard<std::mutex> lock(state_mutex_);
-  if (!assignment_) {
+  std::lock_guard<std::recursive_mutex> lock(state_mutex_);
+  if (!assignment_ || !vibration) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
 
   RefreshDevices();
   std::vector<DeviceId> ids;
   assignment_->DevicesForUser(user_index, ids);
+
+  const X_INPUT_VIBRATION modified = ModifyVibrationLevel(vibration);
 
   // Every pad on this user belongs to the same player, so all of them buzz.
   // Only pads decide the result: synthetic devices accept any vibration and
@@ -364,7 +535,8 @@ X_RESULT InputSystem::SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration
     if (!driver || !info) {
       continue;
     }
-    X_RESULT result = driver->SetDeviceVibration(id, vibration);
+    X_INPUT_VIBRATION per_device = modified;
+    X_RESULT result = driver->SetDeviceVibration(id, &per_device);
     if (info->synthetic) {
       any_synthetic = true;
       continue;
@@ -388,7 +560,7 @@ X_RESULT InputSystem::SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration
 X_RESULT InputSystem::GetKeystroke(uint32_t user_index, uint32_t flags,
                                    X_INPUT_KEYSTROKE* out_keystroke) {
   SCOPE_profile_cpu_f("hid");
-  std::lock_guard<std::mutex> lock(state_mutex_);
+  std::lock_guard<std::recursive_mutex> lock(state_mutex_);
   if (!assignment_) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }

@@ -47,6 +47,14 @@ REXCVAR_DEFINE_STRING(render_target_path_d3d12, "", "GPU/D3D12",
 
 REXCVAR_DEFINE_BOOL(native_stencil_value_output, true, "GPU", "Enable native stencil value output");
 
+REXCVAR_DEFINE_BOOL(
+    transfer_skip_depth_under_overwriting_rectangle, false, "GPU/D3D12",
+    "Skip copying EDRAM data into a depth render target where the draw that takes the range over "
+    "overwrites every sample anyway: a clip-disabled rectangle (run on the CPU to get its exact "
+    "pixels) writing depth with ALWAYS and stencil with ALWAYS/REPLACE (mask 0xFF), no pixel "
+    "discard, alpha test or alpha to coverage, and a full sample mask. Saves full-screen clear "
+    "quads' copies of data they erase.");
+
 namespace rex::graphics::d3d12 {
 
 // Generated with `xb buildshaders`.
@@ -1112,12 +1120,62 @@ bool D3D12RenderTargetCache::Update(bool is_rasterization_done,
                                  normalized_color_mask, vertex_shader)) {
     return false;
   }
+  // A depth range taken over by a draw that overwrites every sample of a known
+  // rectangle needs no copy inside that rectangle (like a resolve clear).
+  Transfer::Rectangle overwritten_rectangle;
+  bool overwritten_rectangle_valid = false;
+  if (REXCVAR_GET(transfer_skip_depth_under_overwriting_rectangle) &&
+      GetPath() == Path::kHostRenderTargets && draw_writes_all_covered_samples_ &&
+      !last_update_transfers()[0].empty() && last_update_accumulated_render_targets()[0]) {
+    const RegisterFile& regs = register_file();
+    const reg::RB_DEPTHCONTROL dc = normalized_depth_control;
+    auto srm = regs.Get<reg::RB_STENCILREFMASK>();
+    auto srm_bf = regs.Get<reg::RB_STENCILREFMASK>(XE_GPU_REG_RB_STENCILREFMASK_BF);
+    auto stencil_op_overwrites = [](xenos::StencilOp op) {
+      return op == xenos::StencilOp::kReplace || op == xenos::StencilOp::kZero;
+    };
+    bool overwrites =
+        dc.z_enable && dc.z_write_enable && dc.zfunc == xenos::CompareFunction::kAlways &&
+        dc.stencil_enable && dc.stencilfunc == xenos::CompareFunction::kAlways &&
+        stencil_op_overwrites(dc.stencilzpass) && srm.stencilwritemask == 0xFF &&
+        (!dc.backface_enable || (dc.stencilfunc_bf == xenos::CompareFunction::kAlways &&
+                                 stencil_op_overwrites(dc.stencilzpass_bf) &&
+                                 srm_bf.stencilwritemask == 0xFF));
+    uint32_t left, top, right, bottom;
+    if (overwrites &&
+        draw_extent_estimator().GetFullyCoveredRectangle(vertex_shader, left, top, right, bottom)) {
+      overwritten_rectangle.x_pixels = left;
+      overwritten_rectangle.y_pixels = top;
+      overwritten_rectangle.width_pixels = right - left;
+      overwritten_rectangle.height_pixels = bottom - top;
+      overwritten_rectangle_valid = true;
+    }
+  }
   switch (GetPath()) {
     case Path::kHostRenderTargets: {
       RenderTarget* const* depth_and_color_render_targets =
           last_update_accumulated_render_targets();
-      PerformTransfersAndResolveClears(1 + xenos::kMaxColorRenderTargets,
-                                       depth_and_color_render_targets, last_update_transfers());
+      bool color_transfers = false;
+      for (uint32_t i = 1; i < 1 + xenos::kMaxColorRenderTargets; ++i) {
+        color_transfers |= !last_update_transfers()[i].empty();
+      }
+      if (overwritten_rectangle_valid && color_transfers) {
+        // The rectangle is a cutout for every transfer of a call: colour
+        // transfers first without it, then depth alone with it.
+        std::vector<Transfer> color_transfers_only[1 + xenos::kMaxColorRenderTargets];
+        for (uint32_t i = 1; i < 1 + xenos::kMaxColorRenderTargets; ++i) {
+          color_transfers_only[i] = last_update_transfers()[i];
+        }
+        PerformTransfersAndResolveClears(1 + xenos::kMaxColorRenderTargets,
+                                         depth_and_color_render_targets, color_transfers_only);
+        PerformTransfersAndResolveClears(1, depth_and_color_render_targets,
+                                         last_update_transfers(), nullptr, &overwritten_rectangle);
+      } else {
+        PerformTransfersAndResolveClears(
+            1 + xenos::kMaxColorRenderTargets, depth_and_color_render_targets,
+            last_update_transfers(), nullptr,
+            overwritten_rectangle_valid ? &overwritten_rectangle : nullptr);
+      }
       SetCommandListRenderTargets(depth_and_color_render_targets);
     } break;
     case Path::kPixelShaderInterlock: {

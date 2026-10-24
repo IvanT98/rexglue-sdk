@@ -2369,6 +2369,17 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
   uint32_t normalized_color_mask =
       pixel_shader ? draw_util::GetNormalizedColorMask(regs, pixel_shader->writes_color_targets())
                    : 0;
+  {
+    // Without a pixel shader (dropped when it doesn't write colour 0, see
+    // IsPixelShaderNeededWithRasterization) the alpha test and alpha to
+    // coverage have nothing to act on.
+    render_target_cache_->SetDrawWritesAllCoveredSamples(
+        !(pixel_shader &&
+          (pixel_shader->kills_pixels() ||
+           (pixel_shader->writes_color_target(0) &&
+            draw_util::DoesCoverageDependOnAlpha(regs.Get<reg::RB_COLORCONTROL>())))) &&
+        (regs[XE_GPU_REG_PA_SC_AA_MASK] & 0xF) == 0xF);
+  }
   if (!render_target_cache_->Update(is_rasterization_done, normalized_depth_control,
                                     normalized_color_mask, *vertex_shader)) {
     return false;
@@ -3035,10 +3046,19 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
       return true;
     }
     uint64_t scaled_buffer_base = uint64_t(scaled_resolve_buffer_index) << 30;
-    if (scaled_address < scaled_buffer_base) {
+    // The resolve writes the data of guest address A at A * scale_x * scale_y in the scaled
+    // resolve address space. The current scaled range starts at the copy destination base,
+    // which is below the written extent when the resolve rectangle does not start at the
+    // destination's first tile row, so the source is located from the written address.
+    uint64_t scale_xy =
+        uint64_t(texture_cache_->draw_resolution_scale_x()) * texture_cache_->draw_resolution_scale_y();
+    uint64_t source_address = uint64_t(written_address) * scale_xy;
+    uint64_t source_length = uint64_t(tile_count) * tile_size_1x * scale_xy;
+    if (source_address < scaled_address || source_address < scaled_buffer_base ||
+        source_address + source_length > scaled_address + scaled_length) {
       return true;
     }
-    uint64_t source_offset = scaled_address - scaled_buffer_base;
+    uint64_t source_offset = source_address - scaled_buffer_base;
 
     ui::d3d12::util::DescriptorCpuGpuHandlePair downscale_descriptors[2];
     if (!RequestOneUseSingleViewDescriptors(2, downscale_descriptors)) {
@@ -3047,10 +3067,10 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
 
     const ui::d3d12::D3D12Provider& provider = GetD3D12Provider();
     ID3D12Device* device = provider.GetDevice();
-    uint32_t aligned_scaled_length =
-        rex::align(scaled_length, uint32_t(D3D12_RAW_UAV_SRV_BYTE_ALIGNMENT));
+    uint32_t aligned_source_length =
+        rex::align(uint32_t(source_length), uint32_t(D3D12_RAW_UAV_SRV_BYTE_ALIGNMENT));
     ui::d3d12::util::CreateBufferRawSRV(device, downscale_descriptors[0].first,
-                                        scaled_resolve_buffer, aligned_scaled_length,
+                                        scaled_resolve_buffer, aligned_source_length,
                                         source_offset);
     uint32_t aligned_written_length =
         rex::align(written_length, uint32_t(D3D12_RAW_UAV_SRV_BYTE_ALIGNMENT));
@@ -3069,10 +3089,28 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
     constants.scale_y = texture_cache_->draw_resolution_scale_y();
     constants.pixel_size_log2 = pixel_size_log2;
     constants.tile_count = tile_count;
-    constants.half_pixel_offset = (REXCVAR_GET(readback_resolve_half_pixel_offset) &&
-                                   (constants.scale_x > 1 || constants.scale_y > 1))
-                                      ? 1u
-                                      : 0u;
+    constants.flags = 0;
+    if (REXCVAR_GET(readback_resolve_half_pixel_offset) &&
+        (constants.scale_x > 1 || constants.scale_y > 1)) {
+      constants.flags |= kResolveDownscaleFlagHalfPixelOffset;
+    }
+    if (REXCVAR_GET(readback_resolve_downscale_average) &&
+        copy_dest_info.copy_dest_number == xenos::SurfaceNumberFormat::kUnsignedRepeatingFraction) {
+      // Channels that are whole unsigned normalized bytes can be averaged byte by byte (in
+      // any endian order).
+      switch (xenos::ColorFormat(copy_dest_info.copy_dest_format)) {
+        case xenos::ColorFormat::k_8:
+        case xenos::ColorFormat::k_8_A:
+        case xenos::ColorFormat::k_8_B:
+        case xenos::ColorFormat::k_8_8:
+        case xenos::ColorFormat::k_8_8_8_8:
+        case xenos::ColorFormat::k_8_8_8_8_A:
+          constants.flags |= kResolveDownscaleFlagAverage;
+          break;
+        default:
+          break;
+      }
+    }
     deferred_command_list_.D3DSetComputeRoot32BitConstants(
         UINT(ResolveDownscaleRootParameter::kConstants), sizeof(constants) / sizeof(uint32_t),
         &constants, 0);

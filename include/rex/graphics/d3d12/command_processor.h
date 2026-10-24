@@ -623,8 +623,13 @@ class D3D12CommandProcessor : public CommandProcessor {
     uint32_t scale_y;
     uint32_t pixel_size_log2;
     uint32_t tile_count;
-    uint32_t half_pixel_offset;
+    // kResolveDownscaleFlag*.
+    uint32_t flags;
   };
+  // Sample the centre host pixel of each scaled block instead of the top-left one.
+  static constexpr uint32_t kResolveDownscaleFlagHalfPixelOffset = 1u << 0;
+  // Average the host pixels of each scaled block byte by byte.
+  static constexpr uint32_t kResolveDownscaleFlagAverage = 1u << 1;
   enum class ResolveDownscaleRootParameter : UINT {
     kConstants,
     kSource,

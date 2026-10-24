@@ -82,6 +82,12 @@ REXCVAR_DEFINE_BOOL(readback_resolve_half_pixel_offset, false, "GPU",
                     "scaled block during resolve readback downscale")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
+REXCVAR_DEFINE_BOOL(readback_resolve_downscale_average, true, "GPU",
+                    "When draw resolution scaling is active, give the CPU the average of each "
+                    "scaled block of a read-back resolve (formats with unsigned normalized byte "
+                    "channels), as a 1x resolve would cover it; off: copy one host pixel per block")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 REXCVAR_DEFINE_BOOL(readback_memexport, true, "GPU",
                     "Enable CPU readback of shader memexport writes for guest memory "
                     "coherency (can reduce correctness issues, but may add GPU/CPU sync cost)")

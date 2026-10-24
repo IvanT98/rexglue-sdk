@@ -59,6 +59,10 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
   bool Update(bool is_rasterization_done, reg::RB_DEPTHCONTROL normalized_depth_control,
               uint32_t normalized_color_mask, const Shader& vertex_shader) override;
 
+  // Set before Update: every covered sample of the draw is written (the pixel
+  // shader doesn't kill, no alpha test or alpha to coverage, full sample mask).
+  void SetDrawWritesAllCoveredSamples(bool value) { draw_writes_all_covered_samples_ = value; }
+
   void InvalidateCommandListRenderTargets() {
     are_current_command_list_render_targets_valid_ = false;
   }
@@ -138,6 +142,7 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
   bool bindless_resources_used_;
 
   Path path_ = Path::kHostRenderTargets;
+  bool draw_writes_all_covered_samples_ = false;
 
   // For host render targets, an EDRAM-sized scratch buffer for:
   // - Guest render target data copied from host render targets during copying

@@ -192,6 +192,7 @@ class RenderTargetCache {
   }
 
   const RegisterFile& register_file() const { return register_file_; }
+  DrawExtentEstimator& draw_extent_estimator() { return draw_extent_estimator_; }
 
   virtual bool IsGammaFormatHostStorageSeparate() const = 0;
 

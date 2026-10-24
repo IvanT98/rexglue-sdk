@@ -27,6 +27,7 @@ REXCVAR_DECLARE(bool, resolve_resolution_scale_fill_half_pixel_offset);
 REXCVAR_DECLARE(bool, draw_resolution_scaled_texture_offsets);
 REXCVAR_DECLARE(std::string, readback_resolve);
 REXCVAR_DECLARE(bool, readback_resolve_half_pixel_offset);
+REXCVAR_DECLARE(bool, readback_resolve_downscale_average);
 REXCVAR_DECLARE(int32_t, readback_resolve_smart_frames);
 REXCVAR_DECLARE(int32_t, readback_resolve_smart_period);
 REXCVAR_DECLARE(bool, readback_resolve_smart_skip_steady);

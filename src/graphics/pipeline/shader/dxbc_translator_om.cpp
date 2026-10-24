@@ -1813,8 +1813,11 @@ void DxbcShaderTranslator::CompletePixelShader_AlphaToMask(uint32_t alpha_test_p
     dxbc::Src coverage_src(dxbc::Src::R(coverage_temp, coverage_temp_component));
     if (alpha_test_pass_temp != UINT32_MAX) {
       // No discard: samples failing the alpha test or alpha to coverage get no
-      // coverage.
-      a_.OpAnd(dxbc::Dest::R(coverage_temp, 1 << coverage_temp_component), coverage_src,
+      // coverage. coverage_src swizzles .zxxx (a component index passed as a
+      // swizzle), right only for scalar operands: the masked .z lane needs a
+      // select, or it reads .x (the dither offset) and the coverage is 0.
+      a_.OpAnd(dxbc::Dest::R(coverage_temp, 1 << coverage_temp_component),
+               dxbc::Src::R(coverage_temp).Select(coverage_temp_component),
                dxbc::Src::R(alpha_test_pass_temp, dxbc::Src::kXXXX));
     } else {
       a_.OpDiscard(false, coverage_src);

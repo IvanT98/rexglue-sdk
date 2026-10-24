@@ -464,7 +464,9 @@ int XexModule::ReadImage(const void* xex_addr, size_t xex_length, bool use_dev_k
     return 0;
   }
 
-  memory()->LookupHeap(base_address_)->Reset();
+  // No heap Reset() here: it cleared the page table of the whole heap, so loading a
+  // second module there (a DLL at 0x89000000) marked the executable's and the other
+  // DLLs' images and function tables free, and their later Release failed.
 
   aes_decrypt_buffer(use_dev_key ? xe_xex2_devkit_key : xe_xex2_retail_key,
                      reinterpret_cast<const uint8_t*>(xex_security_info()->aes_key), 16,

@@ -56,6 +56,34 @@ TEST_CASE("FunctionDispatcher: caller_address routes thunk to caller's module po
   CHECK(dispatcher.GetFunction(thunk_b) == &DummyFn);
 }
 
+namespace {
+void OtherFn(PPCContext&, uint8_t*) {}
+}  // namespace
+
+TEST_CASE("FunctionDispatcher: AllocateThunk reuses a module's thunk for the same function",
+          "[runtime][dispatcher]") {
+  // Games look an export up again before every call through it; each lookup
+  // must not take a new slot from the caller's pool.
+  auto& memory = GetTestMemory();
+  rex::runtime::ExportResolver resolver;
+  rex::runtime::FunctionDispatcher dispatcher(&memory, &resolver);
+
+  constexpr uint32_t kModA = 0x8A000000u;
+  constexpr uint32_t kCodeSize = 0x10000u;
+  constexpr uint32_t kImageSize = 0x100000u;
+  REQUIRE(dispatcher.InitializeFunctionTable(kModA, kCodeSize, kModA, kImageSize));
+
+  uint32_t first = dispatcher.AllocateThunk(&DummyFn, kModA + 0x100);
+  REQUIRE(first != 0);
+  constexpr uint32_t kCalls = rex::runtime::FunctionDispatcher::kThunkReserveSize / 4 + 16;
+  for (uint32_t i = 0; i < kCalls; ++i) {
+    REQUIRE(dispatcher.AllocateThunk(&DummyFn, kModA + 0x200) == first);
+  }
+  uint32_t other = dispatcher.AllocateThunk(&OtherFn, kModA + 0x100);
+  CHECK(other == first + 4);
+  CHECK(dispatcher.GetFunction(other) == &OtherFn);
+}
+
 TEST_CASE("FunctionDispatcher: AllocateThunk(0) uses the entrypoint pool only when explicit",
           "[runtime][dispatcher]") {
   // caller_address=0 is reserved for host-initiated allocations that have no

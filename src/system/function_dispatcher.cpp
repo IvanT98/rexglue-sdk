@@ -303,6 +303,11 @@ uint32_t FunctionDispatcher::AllocateThunk(::PPCFunc* func, uint32_t caller_addr
     }
   }
 
+  auto existing = mod->thunks_by_func.find(func);
+  if (existing != mod->thunks_by_func.end()) {
+    return existing->second;
+  }
+
   if (mod->next_thunk_address >= mod->thunk_limit) {
     REXLOG_ERROR("Thunk address space exhausted for module at {:08X}", mod->code_base);
     return 0;
@@ -313,6 +318,7 @@ uint32_t FunctionDispatcher::AllocateThunk(::PPCFunc* func, uint32_t caller_addr
     mod->next_thunk_address -= 4;
     return 0;
   }
+  mod->thunks_by_func.emplace(func, addr);
   return addr;
 }
 

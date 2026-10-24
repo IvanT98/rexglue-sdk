@@ -87,7 +87,8 @@ class FunctionDispatcher : public IModuleRegistrar {
   bool HasAnyFunctionTable() const { return !module_tables_.empty(); }
   /**
    * caller_address must be inside a registered module, or 0 to mean "host-
-   * initiated, route to the entrypoint pool".
+   * initiated, route to the entrypoint pool". A module gets one thunk per host
+   * function: asking again for the same function returns the same address.
    */
   uint32_t AllocateThunk(::PPCFunc* func, uint32_t caller_address);
 
@@ -122,6 +123,10 @@ class FunctionDispatcher : public IModuleRegistrar {
     uint32_t image_size;
     uint32_t next_thunk_address;
     uint32_t thunk_limit;
+    // Thunks already handed out from this pool, by host function. Games call
+    // XexGetProcedureAddress before each call through a DLL export; a new thunk
+    // per call used up the pool within seconds.
+    std::unordered_map<::PPCFunc*, uint32_t> thunks_by_func;
   };
 
   ModuleTableInfo* FindModuleByAddress(uint32_t guest_address);
